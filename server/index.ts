@@ -4,6 +4,23 @@ import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { generateScriptAudio, MAX_SCRIPT_CHARS } from "./scriptAudio";
 import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
+import {
+  buildProjectZip,
+  createProject,
+  deleteProject,
+  getProject,
+  listProjects,
+  MAX_SOURCE_CHARS,
+  NotFoundError,
+  renderFingerprint,
+  safeFileName,
+  saveSectionAudio,
+  sectionFileName,
+  toView,
+  updateProject,
+  updateSection,
+  readSectionAudio,
+} from "./projects";
 
 dotenv.config();
 
@@ -12,13 +29,15 @@ function getGeminiClient(): GoogleGenAI {
   if (!ai) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) throw new Error("Falta la variable de entorno GEMINI_API_KEY.");
-    ai = new GoogleGenAI({ apiKey });
+    // GEMINI_BASE_URL permite pasar por un proxy o apuntar a un servidor de pruebas.
+    const baseUrl = process.env.GEMINI_BASE_URL;
+    ai = new GoogleGenAI({ apiKey, ...(baseUrl ? { httpOptions: { baseUrl } } : {}) });
   }
   return ai;
 }
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -50,6 +69,142 @@ app.post("/api/script-audio", async (req, res) => {
   } catch (error: any) {
     console.error("Script Audio Error:", error);
     res.status(500).json({ error: error.message || "Error al generar el audio del guion." });
+  }
+});
+
+// --- Proyectos: varios audios (uno por bloque) con dirección y reparto comunes ---
+
+const activeJobs = new Set<string>();
+const jobKey = (projectId: string, sectionId: string) => `${projectId}:${sectionId}`;
+const viewOf = (project: Awaited<ReturnType<typeof getProject>>) => toView(project, (sid) => activeJobs.has(jobKey(project.id, sid)));
+
+function sendError(res: express.Response, error: any, fallback: string) {
+  if (error instanceof NotFoundError) return res.status(404).json({ error: error.message });
+  console.error(fallback, error);
+  res.status(500).json({ error: error?.message || fallback });
+}
+
+function contentDisposition(fileName: string): string {
+  const ascii = fileName.normalize("NFD").replace(/[^\x20-\x7e]/g, "").replace(/"/g, "");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`;
+}
+
+app.get("/api/projects", async (_req, res) => {
+  try {
+    res.json(await listProjects());
+  } catch (error) {
+    sendError(res, error, "Error al listar los proyectos.");
+  }
+});
+
+app.post("/api/projects", async (req, res) => {
+  try {
+    const { name, source, direction } = req.body;
+    if (typeof source !== "string" || !source.trim()) return res.status(400).json({ error: "Pega el guion del proyecto." });
+    if (source.length > MAX_SOURCE_CHARS) return res.status(400).json({ error: `El guion supera el máximo de ${MAX_SOURCE_CHARS} caracteres.` });
+    const project = await createProject({
+      name: typeof name === "string" ? name : "",
+      source,
+      direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : "",
+    });
+    res.status(201).json(viewOf(project));
+  } catch (error: any) {
+    res.status(400).json({ error: error.message || "No se pudo crear el proyecto." });
+  }
+});
+
+app.get("/api/projects/:id", async (req, res) => {
+  try {
+    res.json(viewOf(await getProject(req.params.id)));
+  } catch (error) {
+    sendError(res, error, "Error al leer el proyecto.");
+  }
+});
+
+app.patch("/api/projects/:id", async (req, res) => {
+  try {
+    const { name, direction, voices, sections } = req.body;
+    const project = await updateProject(req.params.id, {
+      name,
+      direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : undefined,
+      voices,
+      sections: Array.isArray(sections) ? sections : undefined,
+    });
+    res.json(viewOf(project));
+  } catch (error) {
+    sendError(res, error, "Error al guardar el proyecto.");
+  }
+});
+
+app.delete("/api/projects/:id", async (req, res) => {
+  try {
+    await deleteProject(req.params.id);
+    res.status(204).end();
+  } catch (error) {
+    sendError(res, error, "Error al eliminar el proyecto.");
+  }
+});
+
+app.post("/api/projects/:id/sections/:sectionId/generate", async (req, res) => {
+  const { id, sectionId } = req.params;
+  const key = jobKey(id, sectionId);
+  if (activeJobs.has(key)) return res.status(409).json({ error: "Esta sección ya se está generando." });
+  activeJobs.add(key);
+  try {
+    const project = await updateSection(id, sectionId, (section) => {
+      section.status = "generating";
+      section.error = undefined;
+    });
+    const section = project.sections.find((s) => s.id === sectionId)!;
+    const fingerprint = renderFingerprint(project, section);
+    try {
+      const { wav } = await generateScriptAudio(getGeminiClient(), { script: section.script, voices: project.voices, direction: project.direction });
+      await saveSectionAudio(id, sectionId, wav);
+      const updated = await updateSection(id, sectionId, (s) => {
+        s.status = "done";
+        s.durationSec = Math.round(((wav.length - 44) / 48000) * 10) / 10;
+        s.renderedFrom = fingerprint;
+        s.generatedAt = new Date().toISOString();
+      });
+      activeJobs.delete(key);
+      res.json(viewOf(updated));
+    } catch (error: any) {
+      console.error("Section Audio Error:", error);
+      const updated = await updateSection(id, sectionId, (s) => {
+        s.status = "error";
+        s.error = error?.message || "Error al generar el audio.";
+      });
+      activeJobs.delete(key);
+      res.status(502).json({ error: error?.message || "Error al generar el audio.", project: viewOf(updated) });
+    }
+  } catch (error) {
+    activeJobs.delete(key);
+    sendError(res, error, "Error al generar la sección.");
+  }
+});
+
+app.get("/api/projects/:id/sections/:sectionId/audio", async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    const index = project.sections.findIndex((s) => s.id === req.params.sectionId);
+    if (index < 0) throw new NotFoundError("Sección no encontrada.");
+    const wav = await readSectionAudio(project.id, req.params.sectionId);
+    res.set({ "Content-Type": "audio/wav", "Content-Length": String(wav.length), "Cache-Control": "no-store" });
+    if (req.query.download) res.set("Content-Disposition", contentDisposition(sectionFileName(index, project.sections[index])));
+    res.send(wav);
+  } catch (error) {
+    sendError(res, error, "Error al leer el audio.");
+  }
+});
+
+app.get("/api/projects/:id/zip", async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    const zip = await buildProjectZip(project);
+    res.set({ "Content-Type": "application/zip", "Content-Length": String(zip.length), "Content-Disposition": contentDisposition(`${safeFileName(project.name)}.zip`) });
+    res.send(zip);
+  } catch (error) {
+    sendError(res, error, "Error al preparar el ZIP.");
   }
 });
 

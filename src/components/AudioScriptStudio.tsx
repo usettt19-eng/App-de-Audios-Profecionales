@@ -1,66 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AudioLines, Download, FileUp, Loader2, Mic, Sparkles, Users, Clock, Layers, AlertCircle, SlidersHorizontal, Save, Trash2, Wand2 } from "lucide-react";
+import { AudioLines, Download, FileUp, Loader2, Sparkles, Users, Clock, Layers, AlertCircle } from "lucide-react";
 import { buildRenderPlan, estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
-import { directionSummary, MAX_DIRECTION_CHARS, parseVoiceDirection } from "../lib/voiceDirection";
-
-const VOICES: { name: string; tone: string }[] = [
-  { name: "Kore", tone: "Firme" },
-  { name: "Charon", tone: "Informativa" },
-  { name: "Puck", tone: "Animada" },
-  { name: "Zephyr", tone: "Brillante" },
-  { name: "Aoede", tone: "Fresca" },
-  { name: "Fenrir", tone: "Enérgica" },
-  { name: "Leda", tone: "Juvenil" },
-  { name: "Orus", tone: "Firme" },
-  { name: "Callirrhoe", tone: "Relajada" },
-  { name: "Autonoe", tone: "Brillante" },
-  { name: "Enceladus", tone: "Susurrante" },
-  { name: "Iapetus", tone: "Clara" },
-  { name: "Umbriel", tone: "Relajada" },
-  { name: "Algieba", tone: "Suave" },
-  { name: "Despina", tone: "Suave" },
-  { name: "Erinome", tone: "Clara" },
-  { name: "Algenib", tone: "Grave" },
-  { name: "Rasalgethi", tone: "Informativa" },
-  { name: "Laomedeia", tone: "Animada" },
-  { name: "Achernar", tone: "Suave" },
-  { name: "Alnilam", tone: "Firme" },
-  { name: "Schedar", tone: "Equilibrada" },
-  { name: "Gacrux", tone: "Madura" },
-  { name: "Pulcherrima", tone: "Directa" },
-  { name: "Achird", tone: "Amigable" },
-  { name: "Zubenelgenubi", tone: "Casual" },
-  { name: "Vindemiatrix", tone: "Gentil" },
-  { name: "Sadachbia", tone: "Vivaz" },
-  { name: "Sadaltager", tone: "Experta" },
-  { name: "Sulafat", tone: "Cálida" },
-];
-
-const DEFAULT_VOICE_ROTATION = ["Charon", "Kore", "Puck", "Aoede", "Algenib", "Leda", "Sulafat", "Iapetus"];
-
-const SAVED_DIRECTIONS_KEY = "audios-pro:direcciones";
-
-interface SavedDirection {
-  name: string;
-  text: string;
-}
-
-function loadSavedDirections(): SavedDirection[] {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(SAVED_DIRECTIONS_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function storeSavedDirections(list: SavedDirection[]) {
-  try {
-    localStorage.setItem(SAVED_DIRECTIONS_KEY, JSON.stringify(list));
-  } catch {
-    // Sin almacenamiento disponible (modo privado): los prompts guardados duran solo esta sesión.
-  }
-}
+import { chipButtonClass, DirectionPanel, formatDuration, panelClass, Stat, useParsedDirection, VoiceCast, withDefaultVoices } from "./voiceControls";
 
 const TEMPLATES: { label: string; style: string; script: string }[] = [
   {
@@ -112,23 +53,16 @@ Para cualquier consulta, comuníquense con secretaría. Muchas gracias.`,
   },
 ];
 
-function formatDuration(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return m ? `${m} min ${s} s` : `${s} s`;
-}
-
 export default function AudioScriptStudio() {
   const [script, setScript] = useState<string>(TEMPLATES[0].script);
   const [direction, setDirection] = useState<string>(TEMPLATES[0].style);
-  const [savedDirections, setSavedDirections] = useState<SavedDirection[]>(loadSavedDirections);
   const [voices, setVoices] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const parsedDirection = useMemo(() => (direction.trim() ? parseVoiceDirection(direction) : undefined), [direction]);
+  const parsedDirection = useParsedDirection(direction);
   const segments = useMemo(
     () =>
       parseScript(script, {
@@ -137,46 +71,15 @@ export default function AudioScriptStudio() {
       }),
     [script, parsedDirection]
   );
-  const pauseCount = segments.filter((s) => s.type === "pause").length;
-  const estimatedSeconds = Math.round(estimateDurationSeconds(segments) * (100 / (parsedDirection?.speedPercent || 100)));
   const speakers = useMemo(() => listSpeakers(segments), [segments]);
   const blockCount = useMemo(() => buildRenderPlan(segments).filter((s) => s.type === "block").length, [segments]);
   const lineCount = segments.filter((s) => s.type === "line").length;
+  const pauseCount = segments.filter((s) => s.type === "pause").length;
+  const estimatedSeconds = estimateDurationSeconds(segments) * (100 / (parsedDirection?.speedPercent || 100));
 
-  // Asigna una voz por defecto a cada personaje nuevo sin pisar las elecciones del usuario.
   useEffect(() => {
-    setVoices((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      speakers.forEach((speaker, i) => {
-        if (!next[speaker]) {
-          // El primer personaje toma la voz sugerida por el prompt de dirección, si la hay.
-          next[speaker] = i === 0 && parsedDirection?.suggestedVoice ? parsedDirection.suggestedVoice : DEFAULT_VOICE_ROTATION[i % DEFAULT_VOICE_ROTATION.length];
-          changed = true;
-        }
-      });
-      return changed ? next : prev;
-    });
-  }, [speakers]);
-
-  const applySuggestedVoice = () => {
-    const voice = parsedDirection?.suggestedVoice;
-    if (voice) setVoices((prev) => Object.fromEntries([...Object.keys(prev), ...speakers].map((sp) => [sp, voice])));
-  };
-
-  const saveDirection = () => {
-    const name = window.prompt("Nombre para este prompt de dirección:")?.trim();
-    if (!name) return;
-    const next = [...savedDirections.filter((d) => d.name !== name), { name, text: direction }];
-    setSavedDirections(next);
-    storeSavedDirections(next);
-  };
-
-  const deleteDirection = (name: string) => {
-    const next = savedDirections.filter((d) => d.name !== name);
-    setSavedDirections(next);
-    storeSavedDirections(next);
-  };
+    setVoices((prev) => withDefaultVoices(prev, speakers, parsedDirection?.suggestedVoice));
+  }, [speakers]); // La voz sugerida solo se usa para personajes nuevos, no al editar el prompt.
 
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
 
@@ -201,8 +104,7 @@ export default function AudioScriptStudio() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `Error ${res.status} al generar el audio.`);
       }
-      const blob = await res.blob();
-      setAudioUrl(URL.createObjectURL(blob));
+      setAudioUrl(URL.createObjectURL(await res.blob()));
     } catch (err: any) {
       setError(err.message || "No se pudo generar el audio.");
     } finally {
@@ -211,32 +113,22 @@ export default function AudioScriptStudio() {
   };
 
   return (
-    <div id="audio-script-studio" className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-      {/* Editor de guion */}
-      <div className="lg:col-span-7 bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-2">
-            <AudioLines className="w-4 h-4 text-fuchsia-400" />
-            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Guion</h3>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {TEMPLATES.map((t) => (
-              <button
-                key={t.label}
-                onClick={() => { setScript(t.script); setDirection(t.style); }}
-                className="px-2.5 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700 cursor-pointer"
-              >
-                {t.label}
-              </button>
-            ))}
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="px-2.5 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700 flex items-center gap-1 cursor-pointer"
-            >
-              <FileUp className="w-3 h-3" /> Cargar .txt
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <div className={`lg:col-span-7 ${panelClass}`}>
+        <div className="flex items-center gap-2">
+          <AudioLines className="w-4 h-4 text-fuchsia-400" />
+          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Guion</h3>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {TEMPLATES.map((t) => (
+            <button key={t.label} onClick={() => { setScript(t.script); setDirection(t.style); }} className={chipButtonClass}>
+              {t.label}
             </button>
-            <input ref={fileInputRef} type="file" accept=".txt,.md,.fountain,text/plain" className="hidden" onChange={handleFile} />
-          </div>
+          ))}
+          <button onClick={() => fileInputRef.current?.click()} className={chipButtonClass}>
+            <FileUp className="w-3 h-3" /> Cargar .txt
+          </button>
+          <input ref={fileInputRef} type="file" accept=".txt,.md,.fountain,text/plain" className="hidden" onChange={handleFile} />
         </div>
 
         <textarea
@@ -246,18 +138,9 @@ export default function AudioScriptStudio() {
           className="w-full min-h-[360px] bg-slate-950 border border-slate-800 rounded-lg p-3 font-mono text-xs leading-relaxed text-slate-200 focus:outline-none focus:border-fuchsia-500/60 resize-y"
           placeholder="PERSONAJE (acotación): Texto a locutar..."
         />
-
-        <div className="text-[11px] text-slate-500 leading-relaxed">
-          <span className="font-bold text-slate-400">Formato:</span>{" "}
-          <code className="text-fuchsia-300">PERSONAJE: texto</code> ·{" "}
-          <code className="text-fuchsia-300">PERSONAJE (tono): texto</code> ·{" "}
-          <code className="text-fuchsia-300">(susurrando)</code> acotación en línea ·{" "}
-          <code className="text-fuchsia-300">[PAUSA 1.5s]</code> silencio ·{" "}
-          <code className="text-fuchsia-300"># comentario</code> se ignora. Las líneas sin personaje continúan al anterior.
-        </div>
+        <FormatHelp />
       </div>
 
-      {/* Panel de reparto y generación */}
       <div className="lg:col-span-5 flex flex-col gap-4">
         <div className="grid grid-cols-3 gap-2">
           <Stat icon={<Users className="w-3.5 h-3.5" />} label="Voces" value={String(speakers.length)} />
@@ -265,83 +148,13 @@ export default function AudioScriptStudio() {
           <Stat icon={<Clock className="w-3.5 h-3.5" />} label="Duración est." value={formatDuration(estimatedSeconds)} />
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <SlidersHorizontal className="w-4 h-4 text-fuchsia-400" />
-              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Prompt de dirección de voz</h3>
-            </div>
-            <button
-              onClick={saveDirection}
-              disabled={!direction.trim()}
-              className="px-2 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-40 flex items-center gap-1 cursor-pointer"
-            >
-              <Save className="w-3 h-3" /> Guardar
-            </button>
-          </div>
+        <DirectionPanel
+          value={direction}
+          onChange={setDirection}
+          onApplySuggestedVoice={(voice) => setVoices(Object.fromEntries(speakers.map((sp) => [sp, voice])))}
+        />
 
-          {savedDirections.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {savedDirections.map((d) => (
-                <span key={d.name} className="flex items-center rounded-md bg-slate-950 border border-slate-800 text-[11px]">
-                  <button onClick={() => setDirection(d.text)} className="px-2 py-1 text-slate-300 hover:text-white cursor-pointer">{d.name}</button>
-                  <button onClick={() => deleteDirection(d.name)} aria-label={`Eliminar ${d.name}`} className="pr-1.5 text-slate-600 hover:text-rose-400 cursor-pointer">
-                    <Trash2 className="w-3 h-3" />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-
-          <textarea
-            value={direction}
-            onChange={(e) => setDirection(e.target.value)}
-            maxLength={MAX_DIRECTION_CHARS}
-            spellCheck={false}
-            placeholder="Pega aquí el prompt de narración: tipo de voz, velocidad, estabilidad, estilo, reglas de pausas..."
-            className="w-full min-h-[150px] bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed text-slate-200 focus:outline-none focus:border-fuchsia-500/60 resize-y"
-          />
-
-          {parsedDirection && (
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap gap-1.5">
-                {directionSummary(parsedDirection).map((chip) => (
-                  <span key={chip} className="px-2 py-0.5 rounded-full bg-fuchsia-950/50 border border-fuchsia-900/60 text-[10px] font-semibold text-fuchsia-200">{chip}</span>
-                ))}
-              </div>
-              {parsedDirection.suggestedVoice && (
-                <button
-                  onClick={applySuggestedVoice}
-                  className="self-start px-2.5 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-300 hover:text-white flex items-center gap-1 cursor-pointer"
-                >
-                  <Wand2 className="w-3 h-3" /> Usar voz sugerida: {parsedDirection.suggestedVoice}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Mic className="w-4 h-4 text-fuchsia-400" />
-            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Reparto de voces</h3>
-          </div>
-          {speakers.length === 0 && <p className="text-[11px] text-slate-500">Escribe un guion para detectar personajes.</p>}
-          {speakers.map((speaker) => (
-            <div key={speaker} className="flex items-center justify-between gap-3">
-              <span className="text-xs font-bold text-slate-200 truncate">{speaker}</span>
-              <select
-                value={voices[speaker] || ""}
-                onChange={(e) => setVoices((v) => ({ ...v, [speaker]: e.target.value }))}
-                className="bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
-              >
-                {VOICES.map((v) => (
-                  <option key={v.name} value={v.name}>{v.name} — {v.tone}</option>
-                ))}
-              </select>
-            </div>
-          ))}
-
+        <VoiceCast speakers={speakers} voices={voices} onChange={setVoices}>
           <button
             onClick={handleGenerate}
             disabled={loading || !lineCount}
@@ -350,23 +163,14 @@ export default function AudioScriptStudio() {
             {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             {loading ? `Generando ${blockCount} bloque(s)...` : "Generar audio"}
           </button>
-
-          {error && (
-            <div className="flex gap-2 text-[11px] text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md p-2">
-              <AlertCircle className="w-4 h-4 shrink-0" /> {error}
-            </div>
-          )}
-        </div>
+          {error && <ErrorNote message={error} />}
+        </VoiceCast>
 
         {audioUrl && (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
+          <div className={panelClass}>
             <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Resultado</h3>
             <audio controls src={audioUrl} className="w-full" />
-            <a
-              href={audioUrl}
-              download="locucion.wav"
-              className="px-3 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 bg-slate-950 border border-slate-800 text-slate-200 hover:border-slate-700"
-            >
+            <a href={audioUrl} download="locucion.wav" className={`${chipButtonClass} justify-center py-2 text-slate-200`}>
               <Download className="w-4 h-4" /> Descargar WAV
             </a>
           </div>
@@ -376,13 +180,23 @@ export default function AudioScriptStudio() {
   );
 }
 
-function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+export function ErrorNote({ message }: { message: string }) {
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-lg p-2.5">
-      <div className="flex items-center gap-1.5 text-slate-500 text-[10px] font-bold uppercase tracking-wide">
-        {icon} {label}
-      </div>
-      <div className="text-xs font-bold text-slate-200 mt-1">{value}</div>
+    <div className="flex gap-2 text-[11px] text-rose-300 bg-rose-950/40 border border-rose-900/50 rounded-md p-2">
+      <AlertCircle className="w-4 h-4 shrink-0" /> {message}
+    </div>
+  );
+}
+
+export function FormatHelp() {
+  return (
+    <div className="text-[11px] text-slate-500 leading-relaxed">
+      <span className="font-bold text-slate-400">Formato:</span>{" "}
+      <code className="text-fuchsia-300">PERSONAJE: texto</code> ·{" "}
+      <code className="text-fuchsia-300">PERSONAJE (tono): texto</code> ·{" "}
+      <code className="text-fuchsia-300">(susurrando)</code> acotación en línea ·{" "}
+      <code className="text-fuchsia-300">[PAUSA 1.5s]</code> silencio ·{" "}
+      <code className="text-fuchsia-300"># comentario</code> se ignora. Las líneas sin personaje continúan al anterior.
     </div>
   );
 }

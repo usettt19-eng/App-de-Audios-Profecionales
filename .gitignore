@@ -5,3 +5,4 @@ dist-server/
 .env.local
 *.log
 .DS_Store
+data/

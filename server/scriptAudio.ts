@@ -7,6 +7,8 @@ const SAMPLE_RATE = 24000;
 const BYTES_PER_SAMPLE = 2;
 const CHANNELS = 1;
 const MAX_CONCURRENT_REQUESTS = 3;
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_MS = Number(process.env.TTS_RETRY_BASE_MS ?? 2000);
 
 export const MAX_SCRIPT_CHARS = 20000;
 const FALLBACK_TTS_MODEL = "gemini-2.5-flash-preview-tts";
@@ -87,15 +89,24 @@ async function renderBlock(client: GoogleGenAI, model: string, block: AudioBlock
           },
         };
 
-  const response = await client.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: buildPrompt(block, direction) }] }],
-    config: { responseModalities: ["AUDIO"], speechConfig },
-  });
-
-  const data = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
-  if (!data) throw new Error("El modelo no devolvió audio para uno de los bloques del guion.");
-  return Buffer.from(data, "base64");
+  // Los proyectos largos lanzan muchas solicitudes: se reintentan los límites de cuota y errores transitorios.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await client.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: buildPrompt(block, direction) }] }],
+        config: { responseModalities: ["AUDIO"], speechConfig },
+      });
+      const data = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
+      if (!data) throw new Error("El modelo no devolvió audio para uno de los bloques del guion.");
+      return Buffer.from(data, "base64");
+    } catch (error: any) {
+      const status = Number(error?.status ?? error?.code);
+      const retryable = !status || status === 429 || status >= 500;
+      if (attempt >= MAX_ATTEMPTS || !retryable) throw error;
+      await new Promise((r) => setTimeout(r, RETRY_BASE_MS * 2 ** (attempt - 1)));
+    }
+  }
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
