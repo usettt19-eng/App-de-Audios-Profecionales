@@ -6,6 +6,8 @@ import { estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scrip
 import { importTechnicalScript } from "../lib/technicalScript";
 import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
+import ScriptGenerator from "./ScriptGenerator";
+import { DOCUMENTARY_VOICE_DIRECTION } from "../lib/scriptTemplates";
 import {
   chipButtonClass, DirectionPanel, formatDuration, ModelPicker, panelClass, Stat, useTtsCatalog, VoiceCast, voicesForModel, withDefaultVoices,
 } from "./voiceControls";
@@ -115,8 +117,18 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
   const [direction, setDirection] = useState("");
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"ai" | "paste">("ai");
+  const [writing, setWriting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const catalog = useTtsCatalog();
+
+  // Al generar con IA: nombre del proyecto a partir del título y dirección de voz del proceso documental.
+  const startGeneration = (titulo: string) => {
+    setWriting(true);
+    setSource("");
+    setName((current) => current || titulo.replace(/\s*\|.*$/, "").trim() || titulo);
+    setDirection((current) => current || DOCUMENTARY_VOICE_DIRECTION);
+  };
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const model = chosenModel ?? catalog?.defaultModel ?? "";
 
@@ -154,14 +166,30 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
           placeholder="Nombre del proyecto (p. ej. Construcciones imposibles)"
           className="bg-slate-950 border border-slate-800 rounded-md px-3 py-2 text-sm font-bold text-slate-100 focus:outline-none focus:border-fuchsia-500/60"
         />
+        <div className="flex gap-1 bg-slate-950 border border-slate-800 rounded-lg p-1 self-start">
+          {([["ai", "Generar guion con IA"], ["paste", "Pegar o cargar guion"]] as const).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setMode(value)}
+              disabled={writing}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-bold cursor-pointer ${mode === value ? "bg-fuchsia-600 text-white" : "text-slate-400 hover:text-slate-200"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {mode === "ai" && <ScriptGenerator onStart={startGeneration} onText={setSource} onDone={() => setWriting(false)} />}
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Guion completo</span>
-          <button onClick={() => fileInputRef.current?.click()} className={chipButtonClass}>
-            <FileUp className="w-3 h-3" /> Cargar archivo
-          </button>
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Guion completo {mode === "ai" && "(editable)"}</span>
+          {mode === "paste" && (
+            <button onClick={() => fileInputRef.current?.click()} className={chipButtonClass}>
+              <FileUp className="w-3 h-3" /> Cargar archivo
+            </button>
+          )}
           <input ref={fileInputRef} type="file" accept=".txt,.md,text/plain,text/markdown" className="hidden" onChange={handleFile} />
         </div>
         <textarea
+          readOnly={writing}
           value={source}
           onChange={(e) => setSource(e.target.value)}
           spellCheck={false}
@@ -199,7 +227,7 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
               </li>
             ))}
           </ol>
-          <button onClick={create} disabled={creating || preview.length === 0} className={primaryButtonClass}>
+          <button onClick={create} disabled={creating || writing || preview.length === 0} className={primaryButtonClass}>
             {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderPlus className="w-4 h-4" />}
             Crear proyecto con {preview.length} audio{preview.length === 1 ? "" : "s"}
           </button>

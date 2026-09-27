@@ -12,6 +12,16 @@ npm run dev            # http://localhost:3000
 
 Producción: `npm run build && npm start`.
 
+## Guiones generados con IA
+
+En **Nuevo proyecto → Generar guion con IA** escribes el título del documental (y, si quieres, indicaciones adicionales, duración y número de estructuras) y la app escribe el guion completo con un modelo de texto de OpenRouter, en vivo, usando el prompt del proceso documental:
+
+- El prompt es editable (se guarda en el navegador) y admite las variables `{titulo}`, `{tema}`, `{duracion}`, `{palabras}` y `{segmentos}`.
+- Al final se añaden siempre unas reglas de formato fijas (`src/lib/scriptTemplates.ts`) para que el modelo marque cada bloque como `[BLOQUE N — NOMBRE]` con su música, tono y pausas, y la app pueda dividirlo en audios.
+- El modelo se elige de la lista de OpenRouter, con los recomendados primero y el costo aproximado por guion. Por defecto, el primero disponible entre Claude Sonnet/Opus, GPT-5 y Gemini 3 (o `OPENROUTER_TEXT_MODEL`).
+- Al generar, el nombre del proyecto sale del título y la dirección de voz se completa con la del proceso documental (voz grave de documental, 90-95 % de velocidad, pausas tras cifras y el prompt de estilo).
+- El guion se puede corregir antes de crear el proyecto.
+
 ## Proyectos: varios audios de un mismo guion
 
 En la pestaña **Proyectos** pega un guion técnico completo (o cárgalo desde un `.md`/`.txt`). Cada `[BLOQUE N — TÍTULO]` se convierte en un audio separado:
@@ -120,6 +130,8 @@ Los prompts se pueden guardar con un nombre (en el navegador) para reutilizarlos
 
 API:
 
+- `GET /api/text-models` → modelos de texto de OpenRouter para escribir guiones
+- `POST /api/scripts/generate` `{ titulo, tema, duracion, segmentos, template, model }` → guion en texto plano, en streaming
 - `GET /api/tts/models` → modelo por defecto, motores configurados y modelos con sus voces
 - `POST /api/script-audio` `{ script, voices, direction, model }` → `audio/wav`
 - `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:id`
@@ -158,7 +170,7 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `APP_PASSWORD` | Contraseña de acceso a la app (usuario `admin`, o el de `APP_USER`) |
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
-| `OPENROUTER_TTS_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
+| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
 Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.
 

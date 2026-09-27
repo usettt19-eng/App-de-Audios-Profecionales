@@ -7,6 +7,8 @@ import { defaultModel, EngineRegistry, generateScriptAudio, MAX_SCRIPT_CHARS } f
 import { geminiEngine } from "./engines/gemini";
 import { openRouterEngine } from "./engines/openrouter";
 import { availableModels } from "./ttsCatalog";
+import { defaultTextModel, FALLBACK_TEXT_MODEL, listTextModels, streamScript } from "./scriptWriter";
+import { buildScriptPrompt } from "../src/lib/scriptTemplates";
 import { pcmDurationSeconds } from "./audio";
 import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
 import {
@@ -86,6 +88,55 @@ app.get("/api/tts/models", async (_req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message || "No se pudo obtener la lista de modelos." });
+  }
+});
+
+// --- Guiones con IA (modelos de texto de OpenRouter) ---
+
+app.get("/api/text-models", async (_req, res) => {
+  try {
+    const models = await listTextModels(fetch, process.env.OPENROUTER_BASE_URL || undefined);
+    res.json({ defaultModel: defaultTextModel(models), models });
+  } catch (error: any) {
+    // Sin lista en vivo, se ofrece al menos el modelo por defecto.
+    const fallback = process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+    res.json({ defaultModel: fallback, models: [{ id: fallback, name: fallback, recommended: true }], warning: error.message });
+  }
+});
+
+// Devuelve el guion en texto plano a medida que se escribe. Si falla a mitad, el flujo termina con
+// un carácter NUL seguido del mensaje de error, para que la interfaz lo distinga del guion.
+app.post("/api/scripts/generate", async (req, res) => {
+  const { titulo, tema, duracion, segmentos, template, model } = req.body ?? {};
+  if (typeof titulo !== "string" || !titulo.trim()) return res.status(400).json({ error: "Escribe el título del documental." });
+  if (typeof template !== "string" || !template.trim()) return res.status(400).json({ error: "El prompt del guion está vacío." });
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+
+  const prompt = buildScriptPrompt(template.slice(0, 20000), {
+    titulo: titulo.slice(0, 300),
+    tema: typeof tema === "string" ? tema.slice(0, 2000) : "",
+    duracion: typeof duracion === "string" && duracion.trim() ? duracion.slice(0, 20) : "25-30",
+    segmentos: typeof segmentos === "string" && segmentos.trim() ? segmentos.slice(0, 20) : "12 a 15",
+  });
+
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+  try {
+    const chunks = await streamScript(
+      { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined, signal: abort.signal },
+      { model: cleanModel(model) || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL, prompt }
+    );
+    // "X-Accel-Buffering: no" evita que Nginx acumule la respuesta y el texto aparece en vivo.
+    res.set({ "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    for await (const text of chunks) res.write(text);
+    res.end();
+  } catch (error: any) {
+    if (abort.signal.aborted) return;
+    console.error("Script Generation Error:", error);
+    if (!res.headersSent) return res.status(502).json({ error: error.message || "No se pudo generar el guion." });
+    res.end(`\u0000${error.message || "La generación se interrumpió."}`);
   }
 });
 
