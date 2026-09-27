@@ -1,7 +1,7 @@
 import type { AudioBlock } from "../../src/lib/scriptParser";
 import type { VoiceDirection } from "../../src/lib/voiceDirection";
 import { modelSupportsInstructions, modelUsesGeminiVoices } from "../../src/lib/ttsModels";
-import { isMp3, isWav, wavToPcm } from "../audio";
+import { isMp3, isWav, rawPcmToPcm, SAMPLE_RATE, wavToPcm } from "../audio";
 import { RenderContext, TtsEngine, TtsError, withRetries } from "./types";
 
 export interface OpenRouterOptions {
@@ -41,6 +41,9 @@ async function errorFrom(res: Response): Promise<TtsError> {
   try {
     const data = JSON.parse(text);
     message = data?.error?.message || data?.message || message;
+    // Los errores de validación llegan como una lista JSON de problemas: se muestran solo sus mensajes.
+    const issues = JSON.parse(message);
+    if (Array.isArray(issues)) message = issues.map((i: any) => [i?.path?.join?.("."), i?.message].filter(Boolean).join(": ")).join("; ");
   } catch {
     // Respuesta no JSON: se usa el texto tal cual.
   }
@@ -59,7 +62,7 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
       let speed = direction?.speedPercent && direction.speedPercent !== 100 ? Math.min(2, Math.max(0.5, direction.speedPercent / 100)) : undefined;
 
       return withRetries(async () => {
-        const body: Record<string, unknown> = { model, input: buildInput(block, model, direction), response_format: "wav" };
+        const body: Record<string, unknown> = { model, input: buildInput(block, model, direction), response_format: "pcm" };
         if (voice) body.voice = voice;
         if (speed) body.speed = speed;
 
@@ -87,8 +90,11 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
         if (isMp3(audio)) throw new TtsError(`El modelo ${model} solo entrega MP3; elige otro modelo.`, 400);
         const type = res.headers.get("content-type") || "";
         if (/json|text/.test(type)) throw new TtsError("OpenRouter no devolvió audio.", 502);
-        // PCM sin cabecera: OpenRouter lo entrega a 24 kHz, 16 bits, mono.
-        return audio;
+        // PCM sin cabecera (16 bits). La frecuencia y los canales vienen en el content-type
+        // (p. ej. "audio/pcm;rate=24000"); si no, se asume 24 kHz mono, lo habitual en OpenRouter.
+        const rate = Number(type.match(/rate=(\d+)/i)?.[1]) || SAMPLE_RATE;
+        const channels = Number(type.match(/channels=(\d+)/i)?.[1]) || 1;
+        return rawPcmToPcm(audio, rate, channels);
       });
     },
   };

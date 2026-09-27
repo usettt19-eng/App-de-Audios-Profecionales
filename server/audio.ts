@@ -104,3 +104,24 @@ export function isWav(buf: Buffer): boolean {
 export function isMp3(buf: Buffer): boolean {
   return buf.toString("ascii", 0, 3) === "ID3" || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0);
 }
+
+// PCM 16 bits sin cabecera, a cualquier frecuencia y número de canales, convertido a 16 bits mono 24 kHz.
+export function rawPcmToPcm(pcm: Buffer, sampleRate: number, channels = 1): Buffer {
+  const even = pcm.subarray(0, pcm.length - (pcm.length % (2 * channels)));
+  if (sampleRate === SAMPLE_RATE && channels === 1) return even;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + even.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * channels * 2, 28);
+  header.writeUInt16LE(channels * 2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(even.length, 40);
+  return wavToPcm(Buffer.concat([header, even]));
+}

@@ -82,7 +82,7 @@ Los nombres de personaje se reconocen si están en MAYÚSCULAS o tienen una o do
 - OpenRouter genera una voz por solicitud: en diálogos, cada intervención se genera aparte y se une en orden.
 - A los modelos que no entienden indicaciones de tono se les quitan las acotaciones para que no las lean en voz alta.
 - La velocidad del prompt se envía como `speed`; si el modelo no la acepta, se reintenta sin ella.
-- El audio se pide en WAV y se convierte a 24 kHz mono (cualquier frecuencia o canales). Los modelos que solo entregan MP3 no son compatibles.
+- El audio se pide en PCM (OpenRouter acepta `pcm` o `mp3`) y se convierte a 24 kHz mono según la frecuencia que indique la respuesta; también se aceptan respuestas WAV. Los modelos que solo entregan MP3 no son compatibles.
 
 ## Prompt de dirección de voz
 

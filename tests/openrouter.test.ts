@@ -56,7 +56,7 @@ test("envía cada personaje por separado con su voz y la clave de OpenRouter", a
   assert.deepEqual(calls.map((c) => c.body.voice), ["Kore", "Charon", "Kore"]);
   assert.equal(calls[0].url, "https://example.test/api/v1/audio/speech");
   assert.equal((calls[0].headers as any).Authorization, "Bearer sk-test");
-  assert.equal(calls[0].body.response_format, "wav");
+  assert.equal(calls[0].body.response_format, "pcm", "OpenRouter solo acepta mp3 o pcm");
   assert.equal(calls[0].body.model, "google/gemini-3.8-flash-tts");
   // 3 s de voz + 2 respiros de 250 ms
   assert.equal((wav.length - 44) / 48000, 3.5);
@@ -126,6 +126,21 @@ test("convierte WAV de cualquier frecuencia y canales a 24 kHz mono", () => {
   assert.ok(peak > 9000 && peak < 11000, `amplitud conservada (${peak})`);
 });
 
+test("acepta PCM sin cabecera y respeta la frecuencia del content-type", async () => {
+  const pcm24k = toneWav(1, 24000, 1).subarray(44);
+  const pcm48k = toneWav(1, 48000, 1).subarray(44);
+  const responses = [
+    new Response(pcm24k, { headers: { "content-type": "audio/pcm" } }),
+    new Response(pcm48k, { headers: { "content-type": "audio/pcm;rate=48000" } }),
+  ];
+  const { wav } = await generateScriptAudio(
+    engines([], (_b, n) => responses[n - 1]),
+    { model: "google/gemini-3.8-flash-tts", script: "ANA: Hola.\nMARCOS: Adiós.", voices: {} }
+  );
+  // 1 s + 1 s (el de 48 kHz convertido a 24 kHz) + respiro de 250 ms
+  assert.equal((wav.length - 44) / 48000, 2.25);
+});
+
 test("rechaza MP3 con un mensaje claro", async () => {
   const mp3 = Buffer.concat([Buffer.from("ID3"), Buffer.alloc(100)]);
   await assert.rejects(
@@ -154,4 +169,16 @@ test("lee modelos y voces de la API de modelos de OpenRouter", async () => {
       supportsInstructions: false,
     },
   ]);
+});
+
+test("muestra de forma legible los errores de validación de OpenRouter", async () => {
+  const issues = JSON.stringify([{ code: "invalid_value", values: ["mp3", "pcm"], path: ["response_format"], message: 'Invalid option: expected one of "mp3"|"pcm"' }]);
+  await assert.rejects(
+    generateScriptAudio(engines([], () => new Response(JSON.stringify({ error: { message: issues } }), { status: 400 })), {
+      model: "google/gemini-3.8-flash-tts",
+      script: "Hola.",
+      voices: {},
+    }),
+    /OpenRouter \(400\): response_format: Invalid option: expected one of "mp3"\|"pcm"$/
+  );
 });
