@@ -1,0 +1,78 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER || 'root' }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+    steps:
+      - name: Comprobar configuración
+        id: config
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_PRIVATE_KEY" ]; then
+            echo "::notice::Despliegue omitido: faltan los secrets SSH_HOST y/o SSH_PRIVATE_KEY."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.config.outputs.skip != 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.config.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verificar y compilar
+        if: steps.config.outputs.skip != 'true'
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
+          tar -czf audios-pro-release.tgz dist dist-server package.json package-lock.json
+
+      - name: Preparar SSH
+        if: steps.config.outputs.skip != 'true'
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Preparar variables de entorno
+        if: steps.config.outputs.skip != 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_TTS_MODEL: ${{ secrets.GEMINI_TTS_MODEL }}
+          APP_USER: ${{ secrets.APP_USER }}
+          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
+        run: |
+          umask 077
+          : > audios-pro.env
+          for name in GEMINI_API_KEY GEMINI_TTS_MODEL APP_USER APP_PASSWORD; do
+            value="${!name}"
+            if [ -n "$value" ]; then echo "${name}=${value}" >> audios-pro.env; fi
+          done
+
+      - name: Desplegar en el servidor
+        if: steps.config.outputs.skip != 'true'
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -p $SSH_PORT -o StrictHostKeyChecking=yes"
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" audios-pro-release.tgz audios-pro.env scripts/remote-deploy.sh "$SSH_USER@$SSH_HOST:/tmp/"
+          $SSH "$SSH_USER@$SSH_HOST" 'bash /tmp/remote-deploy.sh; status=$?; rm -f /tmp/remote-deploy.sh; exit $status'

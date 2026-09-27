@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import { timingSafeEqual } from "crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { generateScriptAudio, MAX_SCRIPT_CHARS } from "./scriptAudio";
@@ -37,6 +38,23 @@ function getGeminiClient(): GoogleGenAI {
 }
 
 const app = express();
+
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a);
+  const right = Buffer.from(b);
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+// Con APP_PASSWORD definida, toda la app (menos /api/health) exige usuario y contraseña (HTTP Basic).
+app.use((req, res, next) => {
+  const password = process.env.APP_PASSWORD;
+  if (!password || req.path === "/api/health") return next();
+  const [scheme, encoded] = (req.headers.authorization || "").split(" ");
+  const [user, ...rest] = Buffer.from(encoded || "", "base64").toString("utf8").split(":");
+  if (scheme === "Basic" && safeEqual(user, process.env.APP_USER || "admin") && safeEqual(rest.join(":"), password)) return next();
+  res.set("WWW-Authenticate", 'Basic realm="Audios Profesionales", charset="UTF-8"').status(401).send("Acceso restringido.");
+});
+
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/health", (_req, res) => {
