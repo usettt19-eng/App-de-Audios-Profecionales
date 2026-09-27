@@ -1,0 +1,133 @@
+import type { GoogleGenAI } from "@google/genai";
+import { AudioBlock, buildRenderPlan, listSpeakers, parseScript } from "../src/lib/scriptParser";
+
+// Gemini TTS devuelve PCM lineal de 16 bits, mono, a 24 kHz.
+const SAMPLE_RATE = 24000;
+const BYTES_PER_SAMPLE = 2;
+const CHANNELS = 1;
+const MAX_CONCURRENT_REQUESTS = 3;
+
+export const MAX_SCRIPT_CHARS = 20000;
+const FALLBACK_TTS_MODEL = "gemini-2.5-flash-preview-tts";
+
+export interface ScriptAudioRequest {
+  script: string;
+  voices: Record<string, string>;
+  style?: string;
+  model?: string;
+}
+
+function silence(ms: number): Buffer {
+  const samples = Math.round((SAMPLE_RATE * ms) / 1000);
+  return Buffer.alloc(samples * BYTES_PER_SAMPLE * CHANNELS);
+}
+
+export function pcmToWav(pcm: Buffer): Buffer {
+  const header = Buffer.alloc(44);
+  const byteRate = SAMPLE_RATE * CHANNELS * BYTES_PER_SAMPLE;
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(CHANNELS, 22);
+  header.writeUInt32LE(SAMPLE_RATE, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(CHANNELS * BYTES_PER_SAMPLE, 32);
+  header.writeUInt16LE(BYTES_PER_SAMPLE * 8, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
+}
+
+// Los nombres de personaje deben coincidir exactamente entre el prompt y la configuración de voces.
+function speakerAlias(name: string): string {
+  return name.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") || "VOZ";
+}
+
+function buildPrompt(block: AudioBlock, style?: string): string {
+  const directions = block.lines
+    .filter((l) => l.direction)
+    .map((l) => `- ${speakerAlias(l.speaker)} en "${l.text.slice(0, 60)}": ${l.direction}`);
+
+  const header = [
+    "Interpreta el siguiente guion como una locución profesional en español, con dicción clara y ritmo natural.",
+    "Las indicaciones entre corchetes son acotaciones de interpretación: no las leas en voz alta.",
+    style ? `Dirección general de voz: ${style}` : "",
+    directions.length ? `Indicaciones por línea:\n${directions.join("\n")}` : "",
+  ].filter(Boolean);
+
+  const body =
+    block.speakers.length === 1
+      ? block.lines.map((l) => l.text).join("\n")
+      : block.lines.map((l) => `${speakerAlias(l.speaker)}: ${l.text}`).join("\n");
+
+  return `${header.join("\n")}\n\n${body}`;
+}
+
+async function renderBlock(client: GoogleGenAI, model: string, block: AudioBlock, voices: Record<string, string>, style?: string): Promise<Buffer> {
+  const voiceFor = (speaker: string) => ({ prebuiltVoiceConfig: { voiceName: voices[speaker] || "Kore" } });
+
+  const speechConfig =
+    block.speakers.length === 1
+      ? { voiceConfig: voiceFor(block.speakers[0]) }
+      : {
+          multiSpeakerVoiceConfig: {
+            speakerVoiceConfigs: block.speakers.map((speaker) => ({
+              speaker: speakerAlias(speaker),
+              voiceConfig: voiceFor(speaker),
+            })),
+          },
+        };
+
+  const response = await client.models.generateContent({
+    model,
+    contents: [{ role: "user", parts: [{ text: buildPrompt(block, style) }] }],
+    config: { responseModalities: ["AUDIO"], speechConfig },
+  });
+
+  const data = response.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data)?.inlineData?.data;
+  if (!data) throw new Error("El modelo no devolvió audio para uno de los bloques del guion.");
+  return Buffer.from(data, "base64");
+}
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+export async function generateScriptAudio(client: GoogleGenAI, req: ScriptAudioRequest): Promise<{ wav: Buffer; blocks: number; speakers: string[] }> {
+  const segments = parseScript(req.script);
+  const speakers = listSpeakers(segments);
+  if (!speakers.length) throw new Error("El guion no contiene líneas de diálogo.");
+
+  const plan = buildRenderPlan(segments);
+  // Se lee en cada solicitud para respetar variables cargadas por dotenv después de importar este módulo.
+  const model = req.model || process.env.GEMINI_TTS_MODEL || FALLBACK_TTS_MODEL;
+  const blockSteps = plan.filter((s) => s.type === "block");
+  const audio = await mapWithConcurrency(blockSteps, MAX_CONCURRENT_REQUESTS, (step) =>
+    renderBlock(client, model, step.block, req.voices, req.style)
+  );
+
+  const chunks: Buffer[] = [];
+  let blockIndex = 0;
+  for (const step of plan) {
+    if (step.type === "pause") {
+      chunks.push(silence(step.ms));
+    } else {
+      chunks.push(audio[blockIndex++]);
+      // Respiro breve entre bloques para que las uniones suenen naturales.
+      chunks.push(silence(250));
+    }
+  }
+  return { wav: pcmToWav(Buffer.concat(chunks)), blocks: blockSteps.length, speakers };
+}
