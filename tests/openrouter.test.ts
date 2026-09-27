@@ -62,22 +62,48 @@ test("envía cada personaje por separado con su voz y la clave de OpenRouter", a
   assert.equal((wav.length - 44) / 48000, 3.5);
 });
 
-test("con Gemini añade el estilo y las acotaciones; con otros modelos las quita", async () => {
+test("el texto locutado lleva solo el guion; la dirección va en instructions", async () => {
   const direction = "Voz: masculina, tono grave de documental, español latino.\n- Velocidad: 90-95%";
-  const script = "NARRADOR (intrigante): Hay un edificio (susurrando) en el desierto.";
+  const script = "NARRADOR (Intrigante, pausado): Hay un edificio (susurrando) en el desierto.\n[PAUSA 1s]\nNARRADOR (Épico): Y aun así, ahí están.\nNARRADOR (Épico): De pie.";
 
   const gemini: any[] = [];
   await generateScriptAudio(engines(gemini), { model: "google/gemini-3.8-flash-tts", script, voices: {}, direction });
-  const input: string = gemini[0].body.input;
-  assert.match(input, /^Narra en español con tono documental, grave/);
-  assert.match(input, /\[intrigante\] Hay un edificio \[susurrando\] en el desierto\./);
+  // Nada de prefijos, corchetes ni acotaciones en lo que se va a leer en voz alta.
+  assert.equal(gemini[0].body.input, "Hay un edificio en el desierto.");
+  assert.equal(gemini[1].body.input, "Y aun así, ahí están.\nDe pie.");
+  for (const call of gemini) assert.doesNotMatch(call.body.input, /\[|Narra|tono|Intrigante|Épico|susurrando/i);
+  assert.match(gemini[0].body.instructions, /Tono general: documental, grave/);
+  assert.match(gemini[0].body.instructions, /93% de la velocidad/);
+  assert.match(gemini[0].body.instructions, /latinoamericano/);
+  assert.match(gemini[0].body.instructions, /Interpretación: Intrigante, pausado\./);
+  assert.match(gemini[1].body.instructions, /Interpretación: Épico\./);
   assert.equal(gemini[0].body.voice, "Charon", "voz sugerida por el prompt");
   assert.equal(gemini[0].body.speed, 0.93);
 
   const kokoro: any[] = [];
   await generateScriptAudio(engines(kokoro), { model: "hexgrad/kokoro-82m", script, voices: { NARRADOR: "em_alex" }, direction });
   assert.equal(kokoro[0].body.input, "Hay un edificio en el desierto.");
+  assert.equal(kokoro[0].body.instructions, undefined, "los modelos sin soporte de estilo no reciben instrucciones");
   assert.equal(kokoro[0].body.voice, "em_alex");
+});
+
+test("si el modelo rechaza instructions, reintenta sin ellas y no las vuelve a enviar", async () => {
+  const calls: any[] = [];
+  const respond = (body: any) =>
+    body.instructions
+      ? new Response(JSON.stringify({ error: { message: "Unrecognized key: instructions" } }), { status: 400 })
+      : new Response(toneWav(1, 24000, 1));
+  const eng = engines(calls, respond);
+  await generateScriptAudio(eng, { model: "google/gemini-test-sin-instrucciones", script: "Hola.\n[PAUSA]\nAdiós.", voices: {}, direction: "Tono cálido" });
+  // Los bloques salen en paralelo: cada uno puede recibir un rechazo antes de que se aprenda la lección.
+  const accepted = calls.filter((c) => !c.body.instructions);
+  assert.equal(accepted.length, 2);
+  assert.ok(calls.length <= 4);
+
+  calls.length = 0;
+  await generateScriptAudio(eng, { model: "google/gemini-test-sin-instrucciones", script: "Otra vez.", voices: {}, direction: "Tono cálido" });
+  assert.equal(calls.length, 1, "en adelante ya no se envían");
+  assert.equal(calls[0].body.instructions, undefined);
 });
 
 test("si el modelo no acepta speed, reintenta sin él", async () => {
@@ -88,7 +114,7 @@ test("si el modelo no acepta speed, reintenta sin él", async () => {
         ? new Response(JSON.stringify({ error: { message: "Unsupported parameter: speed" } }), { status: 400 })
         : new Response(toneWav(1, 24000, 1))
     ),
-    { model: "hexgrad/kokoro-82m", script: "Hola.", voices: {}, direction: "Velocidad: 90%" }
+    { model: "hexgrad/kokoro-test-sin-speed", script: "Hola.", voices: {}, direction: "Velocidad: 90%" }
   );
   assert.equal(calls.length, 2);
   assert.equal(calls[0].body.speed, 0.9);

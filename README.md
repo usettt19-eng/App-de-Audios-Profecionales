@@ -80,7 +80,7 @@ Los nombres de personaje se reconocen si están en MAYÚSCULAS o tienen una o do
 - El modelo se elige en cada proyecto (y en el audio rápido). La lista combina los modelos conocidos con los que publica la API de modelos de OpenRouter, incluidas sus voces; también se puede escribir cualquier otro `proveedor/modelo`.
 - Los identificadores con `/` van por OpenRouter; los demás, por Gemini directo. Solo aparecen los motores con clave configurada.
 - OpenRouter genera una voz por solicitud: en diálogos, cada intervención se genera aparte y se une en orden.
-- A los modelos que no entienden indicaciones de tono se les quitan las acotaciones para que no las lean en voz alta.
+- OpenRouter locuta todo lo que recibe como texto: por eso solo se le envía el guion limpio (sin acotaciones ni corchetes) y la dirección de voz (tono general, tono de cada párrafo, velocidad, acento) va aparte en el campo `instructions`. Si un modelo no acepta `instructions` o `speed`, se reintenta sin ellos y no se le vuelven a enviar.
 - La velocidad del prompt se envía como `speed`; si el modelo no la acepta, se reintenta sin ella.
 - El audio se pide en PCM (OpenRouter acepta `pcm` o `mp3`) y se convierte a 24 kHz mono según la frecuencia que indique la respuesta; también se aceptan respuestas WAV. Los modelos que solo entregan MP3 no son compatibles.
 

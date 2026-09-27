@@ -14,26 +14,31 @@ export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 // OpenRouter acepta hasta 4096 caracteres por solicitud; se deja margen para las instrucciones de estilo.
 const MAX_INPUT_CHARS = 3000;
 
-// Instrucción breve de estilo para los modelos que la entienden (Gemini, gpt-4o-mini-tts...).
-// Va al inicio del texto, como indican OpenRouter y Google para sus modelos TTS.
-function stylePrefix(direction?: VoiceDirection): string {
-  if (!direction) return "";
-  const parts = [
-    direction.tones.length ? `tono ${direction.tones.join(", ").replace("calido", "cálido").replace("energico", "enérgico")}` : "",
-    ...direction.performanceNotes.map((n) => n.replace(/\.$/, "").toLowerCase()),
-  ].filter(Boolean);
-  return parts.length ? `Narra en español con ${parts.join("; ")}:` : "";
+// El endpoint de voz de OpenRouter locuta TODO lo que recibe en "input": ahí solo va el texto a leer,
+// sin acotaciones. La dirección de voz viaja aparte, en el campo "instructions" (API compatible con OpenAI).
+function buildInput(block: AudioBlock): string {
+  return block.lines
+    .map((l) => l.text.replace(/\[[^\]]*\]\s*/g, "").replace(/\s{2,}/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
-function buildInput(block: AudioBlock, model: string, direction?: VoiceDirection): string {
-  if (!modelSupportsInstructions(model)) {
-    // Estos modelos leerían las acotaciones en voz alta: se quitan.
-    return block.lines.map((l) => l.text.replace(/\[[^\]]*\]\s*/g, "")).join("\n");
-  }
-  const body = block.lines.map((l) => (l.direction ? `[${l.direction}] ${l.text}` : l.text)).join("\n");
-  const prefix = stylePrefix(direction);
-  return prefix ? `${prefix}\n${body}` : body;
+const TONE_LABELS: Record<string, string> = { calido: "cálido", energico: "enérgico" };
+
+function buildInstructions(block: AudioBlock, direction?: VoiceDirection): string {
+  const parts: string[] = ["Locución profesional en español, dicción clara."];
+  if (direction?.tones.length) parts.push(`Tono general: ${direction.tones.map((t) => TONE_LABELS[t] || t).join(", ")}.`);
+  for (const note of direction?.performanceNotes ?? []) parts.push(note);
+  // Tonos por párrafo del guion (p. ej. "Intrigante, pausado" y luego "Épico, reflexivo"), en orden y sin repetir.
+  const lineTones = [...new Set(block.lines.map((l) => l.direction).filter((d): d is string => !!d))];
+  if (lineTones.length === 1) parts.push(`Interpretación: ${lineTones[0]}.`);
+  if (lineTones.length > 1) parts.push(`Interpretación, en este orden a lo largo del texto: ${lineTones.join(" → ")}.`);
+  return parts.join(" ").slice(0, 1000);
 }
+
+// Parámetros opcionales que cada modelo ha rechazado: no se vuelven a enviar mientras el servidor siga en marcha.
+const rejectedParams = new Map<string, Set<string>>();
+const OPTIONAL_PARAMS = ["instructions", "speed"] as const;
 
 async function errorFrom(res: Response): Promise<TtsError> {
   const text = await res.text().catch(() => "");
@@ -59,12 +64,16 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
       const { apiKey, baseUrl = OPENROUTER_BASE_URL, fetch: doFetch = fetch } = options();
       const speaker = block.speakers[0];
       const voice = voices[speaker] || (modelUsesGeminiVoices(model) ? direction?.suggestedVoice || "Kore" : undefined);
-      let speed = direction?.speedPercent && direction.speedPercent !== 100 ? Math.min(2, Math.max(0.5, direction.speedPercent / 100)) : undefined;
+      const speed = direction?.speedPercent && direction.speedPercent !== 100 ? Math.min(2, Math.max(0.5, direction.speedPercent / 100)) : undefined;
+      const instructions = modelSupportsInstructions(model) ? buildInstructions(block, direction) : undefined;
+      const rejected = rejectedParams.get(model) ?? new Set<string>();
+      rejectedParams.set(model, rejected);
 
       return withRetries(async () => {
-        const body: Record<string, unknown> = { model, input: buildInput(block, model, direction), response_format: "pcm" };
+        const body: Record<string, unknown> = { model, input: buildInput(block), response_format: "pcm" };
         if (voice) body.voice = voice;
-        if (speed) body.speed = speed;
+        if (speed && !rejected.has("speed")) body.speed = speed;
+        if (instructions && !rejected.has("instructions")) body.instructions = instructions;
 
         const res = await doFetch(`${baseUrl}/audio/speech`, {
           method: "POST",
@@ -77,9 +86,10 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
         });
         if (!res.ok) {
           const error = await errorFrom(res);
-          // No todos los modelos aceptan "speed": se reintenta sin él y la velocidad queda como instrucción de estilo.
-          if (res.status === 400 && speed && /speed/i.test(error.message)) {
-            speed = undefined;
+          // Si el modelo no acepta un parámetro opcional, se recuerda y se reintenta sin él.
+          const param = OPTIONAL_PARAMS.find((p) => p in body && new RegExp(p, "i").test(error.message));
+          if (res.status === 400 && param) {
+            rejected.add(param);
             throw new TtsError(error.message, 503);
           }
           throw error;
