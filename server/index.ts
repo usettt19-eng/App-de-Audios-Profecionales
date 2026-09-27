@@ -3,6 +3,7 @@ import path from "path";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
 import { generateScriptAudio, MAX_SCRIPT_CHARS } from "./scriptAudio";
+import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
 
 dotenv.config();
 
@@ -25,7 +26,7 @@ app.get("/api/health", (_req, res) => {
 
 app.post("/api/script-audio", async (req, res) => {
   try {
-    const { script, voices, style } = req.body;
+    const { script, voices, direction } = req.body;
     if (typeof script !== "string" || !script.trim()) {
       return res.status(400).json({ error: "El guion está vacío." });
     }
@@ -36,7 +37,7 @@ app.post("/api/script-audio", async (req, res) => {
     const { wav, blocks, speakers } = await generateScriptAudio(getGeminiClient(), {
       script,
       voices: voices && typeof voices === "object" ? voices : {},
-      style: typeof style === "string" ? style.slice(0, 500) : undefined,
+      direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : undefined,
     });
 
     res.set({

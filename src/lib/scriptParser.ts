@@ -29,8 +29,18 @@ export const MAX_BLOCK_CHARS = 2500;
 const PAUSE_RE = /^\[\s*(?:pausa|pause|silencio)\s*(?:(\d+(?:[.,]\d+)?)\s*(ms|s)?)?\s*\]$/i;
 const SPEAKER_RE = /^([\p{L}\p{N}_ .'-]{1,40}?)\s*(?:\(([^)]*)\))?\s*:\s*(.*)$/u;
 
-function parsePauseMs(amount?: string, unit?: string): number {
-  if (!amount) return DEFAULT_PAUSE_MS;
+export interface ParseOptions {
+  // Duración de [PAUSA] sin valor explícito.
+  defaultPauseMs?: number;
+  // Si se define, inserta una pausa tras cada frase con cifras o afirmaciones de escala.
+  pauseAfterNumbersMs?: number;
+}
+
+// Cifras en dígitos o expresiones de escala habituales en narración documental.
+const NUMERIC_RE = /\d|\b(?:mil|miles|mill[oó]n|millones|billones|cientos|centenares|docenas?|por ciento|la mitad|el doble|el triple)\b/i;
+
+function parsePauseMs(amount: string | undefined, unit: string | undefined, fallback: number): number {
+  if (!amount) return fallback;
   const value = parseFloat(amount.replace(",", "."));
   const ms = unit?.toLowerCase() === "ms" ? value : value * 1000;
   return Math.min(Math.max(Math.round(ms), 0), MAX_PAUSE_MS);
@@ -53,8 +63,15 @@ function inlineDirections(text: string): string {
   return text.replace(/\(([^)]{1,60})\)/g, "[$1]").trim();
 }
 
-export function parseScript(script: string): ScriptSegment[] {
+export function parseScript(script: string, options: ParseOptions = {}): ScriptSegment[] {
   const segments: ScriptSegment[] = [];
+  const fallbackPause = options.defaultPauseMs ?? DEFAULT_PAUSE_MS;
+  const pushPause = (ms: number) => {
+    const last = segments[segments.length - 1];
+    // Dos pausas seguidas (una automática y otra escrita) se funden en la más larga.
+    if (last?.type === "pause") last.ms = Math.max(last.ms, ms);
+    else segments.push({ type: "pause", ms });
+  };
   let currentSpeaker = DEFAULT_SPEAKER;
 
   for (const rawLine of script.split(/\r?\n/)) {
@@ -63,7 +80,7 @@ export function parseScript(script: string): ScriptSegment[] {
 
     const pause = line.match(PAUSE_RE);
     if (pause) {
-      segments.push({ type: "pause", ms: parsePauseMs(pause[1], pause[2]) });
+      pushPause(parsePauseMs(pause[1], pause[2], fallbackPause));
       continue;
     }
 
@@ -83,9 +100,14 @@ export function parseScript(script: string): ScriptSegment[] {
       if (!p) continue;
       const inlinePause = p.match(PAUSE_RE);
       if (inlinePause) {
-        segments.push({ type: "pause", ms: parsePauseMs(inlinePause[1], inlinePause[2]) });
-      } else {
+        pushPause(parsePauseMs(inlinePause[1], inlinePause[2], fallbackPause));
+      } else if (options.pauseAfterNumbersMs === undefined) {
         segments.push({ type: "line", speaker: currentSpeaker, text: inlineDirections(p), direction });
+      } else {
+        for (const sentence of p.split(/(?<=[.!?…])\s+/)) {
+          segments.push({ type: "line", speaker: currentSpeaker, text: inlineDirections(sentence), direction });
+          if (NUMERIC_RE.test(sentence)) pushPause(options.pauseAfterNumbersMs);
+        }
       }
     }
   }

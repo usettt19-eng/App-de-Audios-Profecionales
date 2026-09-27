@@ -25,8 +25,8 @@ test("genera un WAV y asigna voces por personaje", async () => {
   assert.deepEqual(speakers, ["LOCUTOR", "DIRECTORA", "PROFE ANA"]);
   assert.equal(wav.subarray(0, 4).toString(), "RIFF");
   assert.equal(wav.subarray(8, 12).toString(), "WAVE");
-  // 2 bloques de 1 s + pausa de 1 s + 2 respiros de 250 ms
-  assert.equal((wav.length - 44) / (24000 * 2), 3.5);
+  // 2 bloques de 1 s + pausa exacta de 1 s (sin respiros añadidos junto a pausas escritas)
+  assert.equal((wav.length - 44) / (24000 * 2), 3);
 
   assert.deepEqual(
     calls[0].config.speechConfig.multiSpeakerVoiceConfig.speakerVoiceConfigs.map((v: any) => [v.speaker, v.voiceConfig.prebuiltVoiceConfig.voiceName]),
@@ -37,4 +37,20 @@ test("genera un WAV y asigna voces por personaje", async () => {
 
 test("rechaza guiones sin diálogo", async () => {
   await assert.rejects(generateScriptAudio(mockClient([]), { script: "# solo comentario", voices: {} }));
+});
+
+test("aplica el prompt de dirección: pausas tras cifras, voz sugerida y notas", async () => {
+  const calls: any[] = [];
+  const { wav, blocks } = await generateScriptAudio(mockClient(calls), {
+    script: "La fosa mide 11 mil metros. Allí hay vida.",
+    voices: {},
+    direction: "Voz: masculina, tono grave de documental.\n- Velocidad: 90-95%\n- Pausas: añade [pausa] de 0.5s después de cada dato numérico",
+  });
+
+  assert.equal(blocks, 2);
+  assert.equal((wav.length - 44) / (24000 * 2), 2.5);
+  const prompt = calls[0].contents[0].parts[0].text;
+  assert.match(prompt, /93% de la velocidad normal/);
+  assert.match(prompt, /Notas del director/);
+  assert.equal(calls[0].config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName, "Charon");
 });

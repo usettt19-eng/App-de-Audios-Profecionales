@@ -1,5 +1,6 @@
 import type { GoogleGenAI } from "@google/genai";
 import { AudioBlock, buildRenderPlan, listSpeakers, parseScript } from "../src/lib/scriptParser";
+import { parseVoiceDirection, VoiceDirection } from "../src/lib/voiceDirection";
 
 // Gemini TTS devuelve PCM lineal de 16 bits, mono, a 24 kHz.
 const SAMPLE_RATE = 24000;
@@ -13,7 +14,8 @@ const FALLBACK_TTS_MODEL = "gemini-2.5-flash-preview-tts";
 export interface ScriptAudioRequest {
   script: string;
   voices: Record<string, string>;
-  style?: string;
+  // Prompt de dirección de voz (perfil, velocidad, estabilidad, reglas de pausas...).
+  direction?: string;
   model?: string;
 }
 
@@ -46,7 +48,7 @@ function speakerAlias(name: string): string {
   return name.normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_|_$/g, "") || "VOZ";
 }
 
-function buildPrompt(block: AudioBlock, style?: string): string {
+function buildPrompt(block: AudioBlock, direction?: VoiceDirection): string {
   const directions = block.lines
     .filter((l) => l.direction)
     .map((l) => `- ${speakerAlias(l.speaker)} en "${l.text.slice(0, 60)}": ${l.direction}`);
@@ -54,7 +56,10 @@ function buildPrompt(block: AudioBlock, style?: string): string {
   const header = [
     "Interpreta el siguiente guion como una locución profesional en español, con dicción clara y ritmo natural.",
     "Las indicaciones entre corchetes son acotaciones de interpretación: no las leas en voz alta.",
-    style ? `Dirección general de voz: ${style}` : "",
+    direction?.performanceNotes.length ? `Interpretación:\n${direction.performanceNotes.map((n) => `- ${n}`).join("\n")}` : "",
+    direction?.raw.trim()
+      ? `Notas del director (tradúcelas a interpretación; los parámetros técnicos de otras plataformas y las reglas de pausas ya están aplicados al audio):\n${direction.raw.trim()}`
+      : "",
     directions.length ? `Indicaciones por línea:\n${directions.join("\n")}` : "",
   ].filter(Boolean);
 
@@ -66,8 +71,9 @@ function buildPrompt(block: AudioBlock, style?: string): string {
   return `${header.join("\n")}\n\n${body}`;
 }
 
-async function renderBlock(client: GoogleGenAI, model: string, block: AudioBlock, voices: Record<string, string>, style?: string): Promise<Buffer> {
-  const voiceFor = (speaker: string) => ({ prebuiltVoiceConfig: { voiceName: voices[speaker] || "Kore" } });
+async function renderBlock(client: GoogleGenAI, model: string, block: AudioBlock, voices: Record<string, string>, direction?: VoiceDirection): Promise<Buffer> {
+  const fallbackVoice = direction?.suggestedVoice || "Kore";
+  const voiceFor = (speaker: string) => ({ prebuiltVoiceConfig: { voiceName: voices[speaker] || fallbackVoice } });
 
   const speechConfig =
     block.speakers.length === 1
@@ -83,7 +89,7 @@ async function renderBlock(client: GoogleGenAI, model: string, block: AudioBlock
 
   const response = await client.models.generateContent({
     model,
-    contents: [{ role: "user", parts: [{ text: buildPrompt(block, style) }] }],
+    contents: [{ role: "user", parts: [{ text: buildPrompt(block, direction) }] }],
     config: { responseModalities: ["AUDIO"], speechConfig },
   });
 
@@ -106,7 +112,11 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 }
 
 export async function generateScriptAudio(client: GoogleGenAI, req: ScriptAudioRequest): Promise<{ wav: Buffer; blocks: number; speakers: string[] }> {
-  const segments = parseScript(req.script);
+  const direction = req.direction?.trim() ? parseVoiceDirection(req.direction) : undefined;
+  const segments = parseScript(req.script, {
+    defaultPauseMs: direction?.defaultPauseMs,
+    pauseAfterNumbersMs: direction?.pauseAfterNumbersMs,
+  });
   const speakers = listSpeakers(segments);
   if (!speakers.length) throw new Error("El guion no contiene líneas de diálogo.");
 
@@ -115,19 +125,19 @@ export async function generateScriptAudio(client: GoogleGenAI, req: ScriptAudioR
   const model = req.model || process.env.GEMINI_TTS_MODEL || FALLBACK_TTS_MODEL;
   const blockSteps = plan.filter((s) => s.type === "block");
   const audio = await mapWithConcurrency(blockSteps, MAX_CONCURRENT_REQUESTS, (step) =>
-    renderBlock(client, model, step.block, req.voices, req.style)
+    renderBlock(client, model, step.block, req.voices, direction)
   );
 
   const chunks: Buffer[] = [];
   let blockIndex = 0;
-  for (const step of plan) {
+  plan.forEach((step, i) => {
     if (step.type === "pause") {
       chunks.push(silence(step.ms));
     } else {
       chunks.push(audio[blockIndex++]);
-      // Respiro breve entre bloques para que las uniones suenen naturales.
-      chunks.push(silence(250));
+      // Respiro breve entre bloques contiguos; si sigue una pausa escrita, se respeta su duración exacta.
+      if (plan[i + 1]?.type === "block") chunks.push(silence(250));
     }
-  }
+  });
   return { wav: pcmToWav(Buffer.concat(chunks)), blocks: blockSteps.length, speakers };
 }

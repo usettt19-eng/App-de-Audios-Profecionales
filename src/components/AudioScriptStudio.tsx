@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { AudioLines, Download, FileUp, Loader2, Mic, Sparkles, Users, Clock, Layers, AlertCircle } from "lucide-react";
+import { AudioLines, Download, FileUp, Loader2, Mic, Sparkles, Users, Clock, Layers, AlertCircle, SlidersHorizontal, Save, Trash2, Wand2 } from "lucide-react";
 import { buildRenderPlan, estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
+import { directionSummary, MAX_DIRECTION_CHARS, parseVoiceDirection } from "../lib/voiceDirection";
 
 const VOICES: { name: string; tone: string }[] = [
   { name: "Kore", tone: "Firme" },
@@ -37,7 +38,46 @@ const VOICES: { name: string; tone: string }[] = [
 
 const DEFAULT_VOICE_ROTATION = ["Charon", "Kore", "Puck", "Aoede", "Algenib", "Leda", "Sulafat", "Iapetus"];
 
+const SAVED_DIRECTIONS_KEY = "audios-pro:direcciones";
+
+interface SavedDirection {
+  name: string;
+  text: string;
+}
+
+function loadSavedDirections(): SavedDirection[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SAVED_DIRECTIONS_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function storeSavedDirections(list: SavedDirection[]) {
+  try {
+    localStorage.setItem(SAVED_DIRECTIONS_KEY, JSON.stringify(list));
+  } catch {
+    // Sin almacenamiento disponible (modo privado): los prompts guardados duran solo esta sesión.
+  }
+}
+
 const TEMPLATES: { label: string; style: string; script: string }[] = [
+  {
+    label: "Documental",
+    style: `Voz: masculina, adulta, 35-50 años, tono grave/cálido de documental (referencia: narrador de National Geographic en español latino, NO tono infantil ni comercial/entusiasta).
+
+Configuración:
+- Estabilidad: alta (0.65-0.75) para evitar variaciones emocionales bruscas
+- Velocidad: 90-95% de la velocidad normal (ritmo pausado, deliberado)
+- Estilo/exageración: baja - la voz no debe sonar "vendedora", sino informativa y levemente solemne, como revelando un secreto
+- Pausas: añade [pausa] de 0.5s después de cada dato numérico o afirmación de escala`,
+    script: `En lo más profundo del océano Pacífico existe un lugar donde la luz del sol nunca ha llegado.
+La fosa de las Marianas alcanza casi 11 mil metros de profundidad. Allí, la presión es mil veces mayor que en la superficie.
+Y, sin embargo, hay vida.
+[pausa]
+Criaturas que brillan en la oscuridad, que no necesitan el sol, que han sobrevivido durante millones de años sin que nadie las viera.`,
+  },
   {
     label: "Anuncio institucional",
     style: "Tono institucional, cálido y confiable, ritmo pausado.",
@@ -80,14 +120,25 @@ function formatDuration(seconds: number): string {
 
 export default function AudioScriptStudio() {
   const [script, setScript] = useState<string>(TEMPLATES[0].script);
-  const [style, setStyle] = useState<string>(TEMPLATES[0].style);
+  const [direction, setDirection] = useState<string>(TEMPLATES[0].style);
+  const [savedDirections, setSavedDirections] = useState<SavedDirection[]>(loadSavedDirections);
   const [voices, setVoices] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const segments = useMemo(() => parseScript(script), [script]);
+  const parsedDirection = useMemo(() => (direction.trim() ? parseVoiceDirection(direction) : undefined), [direction]);
+  const segments = useMemo(
+    () =>
+      parseScript(script, {
+        defaultPauseMs: parsedDirection?.defaultPauseMs,
+        pauseAfterNumbersMs: parsedDirection?.pauseAfterNumbersMs,
+      }),
+    [script, parsedDirection]
+  );
+  const pauseCount = segments.filter((s) => s.type === "pause").length;
+  const estimatedSeconds = Math.round(estimateDurationSeconds(segments) * (100 / (parsedDirection?.speedPercent || 100)));
   const speakers = useMemo(() => listSpeakers(segments), [segments]);
   const blockCount = useMemo(() => buildRenderPlan(segments).filter((s) => s.type === "block").length, [segments]);
   const lineCount = segments.filter((s) => s.type === "line").length;
@@ -99,13 +150,33 @@ export default function AudioScriptStudio() {
       let changed = false;
       speakers.forEach((speaker, i) => {
         if (!next[speaker]) {
-          next[speaker] = DEFAULT_VOICE_ROTATION[i % DEFAULT_VOICE_ROTATION.length];
+          // El primer personaje toma la voz sugerida por el prompt de dirección, si la hay.
+          next[speaker] = i === 0 && parsedDirection?.suggestedVoice ? parsedDirection.suggestedVoice : DEFAULT_VOICE_ROTATION[i % DEFAULT_VOICE_ROTATION.length];
           changed = true;
         }
       });
       return changed ? next : prev;
     });
   }, [speakers]);
+
+  const applySuggestedVoice = () => {
+    const voice = parsedDirection?.suggestedVoice;
+    if (voice) setVoices((prev) => Object.fromEntries([...Object.keys(prev), ...speakers].map((sp) => [sp, voice])));
+  };
+
+  const saveDirection = () => {
+    const name = window.prompt("Nombre para este prompt de dirección:")?.trim();
+    if (!name) return;
+    const next = [...savedDirections.filter((d) => d.name !== name), { name, text: direction }];
+    setSavedDirections(next);
+    storeSavedDirections(next);
+  };
+
+  const deleteDirection = (name: string) => {
+    const next = savedDirections.filter((d) => d.name !== name);
+    setSavedDirections(next);
+    storeSavedDirections(next);
+  };
 
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
 
@@ -124,7 +195,7 @@ export default function AudioScriptStudio() {
       const res = await fetch("/api/script-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, voices, style }),
+        body: JSON.stringify({ script, voices, direction }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -152,7 +223,7 @@ export default function AudioScriptStudio() {
             {TEMPLATES.map((t) => (
               <button
                 key={t.label}
-                onClick={() => { setScript(t.script); setStyle(t.style); }}
+                onClick={() => { setScript(t.script); setDirection(t.style); }}
                 className="px-2.5 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700 cursor-pointer"
               >
                 {t.label}
@@ -190,8 +261,64 @@ export default function AudioScriptStudio() {
       <div className="lg:col-span-5 flex flex-col gap-4">
         <div className="grid grid-cols-3 gap-2">
           <Stat icon={<Users className="w-3.5 h-3.5" />} label="Voces" value={String(speakers.length)} />
-          <Stat icon={<Layers className="w-3.5 h-3.5" />} label="Líneas" value={`${lineCount} · ${blockCount} bloques`} />
-          <Stat icon={<Clock className="w-3.5 h-3.5" />} label="Duración est." value={formatDuration(estimateDurationSeconds(segments))} />
+          <Stat icon={<Layers className="w-3.5 h-3.5" />} label="Líneas" value={`${lineCount} · ${pauseCount} pausas`} />
+          <Stat icon={<Clock className="w-3.5 h-3.5" />} label="Duración est." value={formatDuration(estimatedSeconds)} />
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal className="w-4 h-4 text-fuchsia-400" />
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Prompt de dirección de voz</h3>
+            </div>
+            <button
+              onClick={saveDirection}
+              disabled={!direction.trim()}
+              className="px-2 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-40 flex items-center gap-1 cursor-pointer"
+            >
+              <Save className="w-3 h-3" /> Guardar
+            </button>
+          </div>
+
+          {savedDirections.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {savedDirections.map((d) => (
+                <span key={d.name} className="flex items-center rounded-md bg-slate-950 border border-slate-800 text-[11px]">
+                  <button onClick={() => setDirection(d.text)} className="px-2 py-1 text-slate-300 hover:text-white cursor-pointer">{d.name}</button>
+                  <button onClick={() => deleteDirection(d.name)} aria-label={`Eliminar ${d.name}`} className="pr-1.5 text-slate-600 hover:text-rose-400 cursor-pointer">
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <textarea
+            value={direction}
+            onChange={(e) => setDirection(e.target.value)}
+            maxLength={MAX_DIRECTION_CHARS}
+            spellCheck={false}
+            placeholder="Pega aquí el prompt de narración: tipo de voz, velocidad, estabilidad, estilo, reglas de pausas..."
+            className="w-full min-h-[150px] bg-slate-950 border border-slate-800 rounded-lg p-2.5 font-mono text-[11px] leading-relaxed text-slate-200 focus:outline-none focus:border-fuchsia-500/60 resize-y"
+          />
+
+          {parsedDirection && (
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-1.5">
+                {directionSummary(parsedDirection).map((chip) => (
+                  <span key={chip} className="px-2 py-0.5 rounded-full bg-fuchsia-950/50 border border-fuchsia-900/60 text-[10px] font-semibold text-fuchsia-200">{chip}</span>
+                ))}
+              </div>
+              {parsedDirection.suggestedVoice && (
+                <button
+                  onClick={applySuggestedVoice}
+                  className="self-start px-2.5 py-1 text-[11px] font-semibold rounded-md bg-slate-950 border border-slate-800 text-slate-300 hover:text-white flex items-center gap-1 cursor-pointer"
+                >
+                  <Wand2 className="w-3 h-3" /> Usar voz sugerida: {parsedDirection.suggestedVoice}
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col gap-3">
@@ -214,17 +341,6 @@ export default function AudioScriptStudio() {
               </select>
             </div>
           ))}
-
-          <label className="flex flex-col gap-1 mt-1">
-            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Dirección general</span>
-            <input
-              value={style}
-              onChange={(e) => setStyle(e.target.value)}
-              maxLength={500}
-              placeholder="Ej.: tono cálido de radio, ritmo pausado"
-              className="bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
-            />
-          </label>
 
           <button
             onClick={handleGenerate}
