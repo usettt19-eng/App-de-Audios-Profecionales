@@ -1,52 +1,59 @@
-import React, { useMemo, useState } from "react";
-import { Mic, Save, SlidersHorizontal, Trash2, Wand2 } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { Cpu, Mic, Save, SlidersHorizontal, Trash2, TriangleAlert, Wand2 } from "lucide-react";
+import { GEMINI_VOICES, KNOWN_MODELS, modelUsesGeminiVoices, TtsModelInfo, VoiceOption } from "../lib/ttsModels";
 import { directionSummary, MAX_DIRECTION_CHARS, parseVoiceDirection, VoiceDirection } from "../lib/voiceDirection";
 
-export const VOICES: { name: string; tone: string }[] = [
-  { name: "Kore", tone: "Firme" },
-  { name: "Charon", tone: "Informativa" },
-  { name: "Puck", tone: "Animada" },
-  { name: "Zephyr", tone: "Brillante" },
-  { name: "Aoede", tone: "Fresca" },
-  { name: "Fenrir", tone: "Enérgica" },
-  { name: "Leda", tone: "Juvenil" },
-  { name: "Orus", tone: "Firme" },
-  { name: "Callirrhoe", tone: "Relajada" },
-  { name: "Autonoe", tone: "Brillante" },
-  { name: "Enceladus", tone: "Susurrante" },
-  { name: "Iapetus", tone: "Clara" },
-  { name: "Umbriel", tone: "Relajada" },
-  { name: "Algieba", tone: "Suave" },
-  { name: "Despina", tone: "Suave" },
-  { name: "Erinome", tone: "Clara" },
-  { name: "Algenib", tone: "Grave" },
-  { name: "Rasalgethi", tone: "Informativa" },
-  { name: "Laomedeia", tone: "Animada" },
-  { name: "Achernar", tone: "Suave" },
-  { name: "Alnilam", tone: "Firme" },
-  { name: "Schedar", tone: "Equilibrada" },
-  { name: "Gacrux", tone: "Madura" },
-  { name: "Pulcherrima", tone: "Directa" },
-  { name: "Achird", tone: "Amigable" },
-  { name: "Zubenelgenubi", tone: "Casual" },
-  { name: "Vindemiatrix", tone: "Gentil" },
-  { name: "Sadachbia", tone: "Vivaz" },
-  { name: "Sadaltager", tone: "Experta" },
-  { name: "Sulafat", tone: "Cálida" },
-];
+export interface TtsCatalog {
+  defaultModel: string;
+  configured: { openrouter: boolean; gemini: boolean };
+  models: TtsModelInfo[];
+}
 
-const DEFAULT_VOICE_ROTATION = ["Charon", "Kore", "Puck", "Aoede", "Algenib", "Leda", "Sulafat", "Iapetus"];
+// Catálogo de modelos del servidor (OpenRouter en vivo + conocidos). Se pide una vez por carga de página.
+let catalogPromise: Promise<TtsCatalog> | null = null;
+export function useTtsCatalog(): TtsCatalog | null {
+  const [catalog, setCatalog] = useState<TtsCatalog | null>(null);
+  useEffect(() => {
+    catalogPromise ??= fetch("/api/tts/models").then((r) => {
+      if (!r.ok) throw new Error("No se pudo cargar la lista de modelos.");
+      return r.json();
+    });
+    catalogPromise.then(setCatalog).catch(() => {
+      catalogPromise = null;
+      setCatalog({ defaultModel: KNOWN_MODELS[0].id, configured: { openrouter: false, gemini: false }, models: KNOWN_MODELS });
+    });
+  }, []);
+  return catalog;
+}
 
-// Completa el reparto con una voz para cada personaje nuevo sin pisar las elecciones existentes.
-// El primer personaje toma la voz sugerida por el prompt de dirección, si la hay.
-export function withDefaultVoices(voices: Record<string, string>, speakers: string[], suggested?: string): Record<string, string> {
+// Voces del modelo: las del catálogo; si no se conocen, las de Gemini para modelos Gemini o ninguna (texto libre).
+export function voicesForModel(catalog: TtsCatalog | null, modelId: string): VoiceOption[] {
+  const known = catalog?.models.find((m) => m.id === modelId)?.voices;
+  if (known?.length) return known;
+  return modelUsesGeminiVoices(modelId) ? GEMINI_VOICES : [];
+}
+
+const GEMINI_ROTATION = ["Charon", "Kore", "Puck", "Aoede", "Algenib", "Leda", "Sulafat", "Iapetus"];
+
+// Completa el reparto con una voz válida para cada personaje sin pisar las elecciones existentes.
+// Si el modelo tiene lista de voces, las que no pertenecen a ella se reemplazan (p. ej. al cambiar de modelo).
+// El primer personaje toma la voz sugerida por el prompt de dirección, si el modelo la tiene.
+export function withDefaultVoices(
+  voices: Record<string, string>,
+  speakers: string[],
+  suggested?: string,
+  available: VoiceOption[] = GEMINI_VOICES
+): Record<string, string> {
+  const names = available.map((v) => v.name);
+  const valid = (voice?: string) => !!voice && (!names.length || names.includes(voice));
+  const rotation = names.length ? (names.some((n) => GEMINI_ROTATION.includes(n)) ? GEMINI_ROTATION.filter((n) => names.includes(n)) : names) : [];
   let changed = false;
   const next = { ...voices };
   speakers.forEach((speaker, i) => {
-    if (!next[speaker]) {
-      next[speaker] = i === 0 && suggested ? suggested : DEFAULT_VOICE_ROTATION[i % DEFAULT_VOICE_ROTATION.length];
-      changed = true;
-    }
+    if (valid(next[speaker]) || (!names.length && next[speaker] !== undefined)) return;
+    const fallback = rotation.length ? rotation[i % rotation.length] : "";
+    next[speaker] = i === 0 && suggested && valid(suggested) ? suggested : fallback;
+    changed = true;
   });
   return changed ? next : voices;
 }
@@ -168,15 +175,80 @@ export function DirectionPanel({
   );
 }
 
+export function ModelPicker({ catalog, value, onChange }: { catalog: TtsCatalog | null; value: string; onChange: (model: string) => void }) {
+  const models = catalog?.models ?? [];
+  const isListed = models.some((m) => m.id === value);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customDraft, setCustomDraft] = useState("");
+  const showCustom = customOpen || (!!catalog && !!value && !isListed);
+  const nothingConfigured = catalog && !catalog.configured.openrouter && !catalog.configured.gemini;
+
+  const commitCustom = () => {
+    const id = customDraft.trim();
+    if (id) onChange(id);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="flex items-center justify-between gap-3">
+        <span className="flex items-center gap-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wide">
+          <Cpu className="w-3.5 h-3.5" /> Modelo
+        </span>
+        <select
+          value={showCustom ? "__custom" : value}
+          onChange={(e) => {
+            if (e.target.value === "__custom") {
+              setCustomDraft(isListed ? "" : value);
+              setCustomOpen(true);
+            } else {
+              setCustomOpen(false);
+              onChange(e.target.value);
+            }
+          }}
+          className="min-w-0 max-w-[65%] bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+        >
+          {!catalog && <option value={value}>Cargando…</option>}
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+          <option value="__custom">Otro modelo de OpenRouter…</option>
+        </select>
+      </label>
+      {showCustom && (
+        <input
+          value={customOpen ? customDraft : value}
+          onChange={(e) => {
+            setCustomOpen(true);
+            setCustomDraft(e.target.value);
+          }}
+          onBlur={commitCustom}
+          onKeyDown={(e) => e.key === "Enter" && commitCustom()}
+          placeholder="proveedor/modelo (p. ej. hexgrad/kokoro-82m) y Enter"
+          className="bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs font-mono text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+        />
+      )}
+      {nothingConfigured && (
+        <p className="flex gap-1.5 text-[10px] text-amber-300">
+          <TriangleAlert className="w-3.5 h-3.5 shrink-0" /> El servidor no tiene OPENROUTER_API_KEY configurada.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function VoiceCast({
   speakers,
   voices,
   onChange,
+  available,
+  header,
   children,
 }: {
   speakers: string[];
   voices: Record<string, string>;
   onChange: (voices: Record<string, string>) => void;
+  available: VoiceOption[];
+  header?: React.ReactNode;
   children?: React.ReactNode;
 }) {
   return (
@@ -185,19 +257,29 @@ export function VoiceCast({
         <Mic className="w-4 h-4 text-fuchsia-400" />
         <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Reparto de voces</h3>
       </div>
+      {header}
       {speakers.length === 0 && <p className="text-[11px] text-slate-500">Escribe un guion para detectar personajes.</p>}
       {speakers.map((speaker) => (
         <div key={speaker} className="flex items-center justify-between gap-3">
           <span className="text-xs font-bold text-slate-200 truncate">{speaker}</span>
-          <select
-            value={voices[speaker] || ""}
-            onChange={(e) => onChange({ ...voices, [speaker]: e.target.value })}
-            className="bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
-          >
-            {VOICES.map((v) => (
-              <option key={v.name} value={v.name}>{v.name} — {v.tone}</option>
-            ))}
-          </select>
+          {available.length ? (
+            <select
+              value={voices[speaker] || ""}
+              onChange={(e) => onChange({ ...voices, [speaker]: e.target.value })}
+              className="min-w-0 max-w-[65%] bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+            >
+              {available.map((v) => (
+                <option key={v.name} value={v.name}>{v.tone ? `${v.name} — ${v.tone}` : v.name}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={voices[speaker] || ""}
+              onChange={(e) => onChange({ ...voices, [speaker]: e.target.value.trim() })}
+              placeholder="voz del modelo"
+              className="w-40 bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs font-mono text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+            />
+          )}
         </div>
       ))}
       {children}

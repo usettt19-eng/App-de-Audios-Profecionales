@@ -122,8 +122,16 @@ export function listSpeakers(segments: ScriptSegment[]): string[] {
   return seen;
 }
 
-// Agrupa las líneas en bloques de como máximo 2 voces y un tamaño acotado, respetando el orden.
-export function buildRenderPlan(segments: ScriptSegment[]): RenderPlan {
+export interface PlanOptions {
+  maxSpeakersPerBlock?: number;
+  maxBlockChars?: number;
+}
+
+// Agrupa las líneas en bloques con un número máximo de voces y un tamaño acotado, respetando el orden.
+// Cada motor fija sus límites: Gemini admite 2 voces por solicitud; OpenRouter, una.
+export function buildRenderPlan(segments: ScriptSegment[], options: PlanOptions = {}): RenderPlan {
+  const maxSpeakers = options.maxSpeakersPerBlock ?? MAX_SPEAKERS_PER_BLOCK;
+  const maxChars = options.maxBlockChars ?? MAX_BLOCK_CHARS;
   const plan: RenderPlan = [];
   let block: AudioBlock | null = null;
   let blockChars = 0;
@@ -144,8 +152,8 @@ export function buildRenderPlan(segments: ScriptSegment[]): RenderPlan {
     const needsNewSpeaker = current !== null && !current.speakers.includes(seg.speaker);
     if (
       current &&
-      ((needsNewSpeaker && current.speakers.length >= MAX_SPEAKERS_PER_BLOCK) ||
-        blockChars + seg.text.length > MAX_BLOCK_CHARS)
+      ((needsNewSpeaker && current.speakers.length >= maxSpeakers) ||
+        blockChars + seg.text.length > maxChars)
     ) {
       flush();
     }

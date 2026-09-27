@@ -3,7 +3,11 @@ import path from "path";
 import { timingSafeEqual } from "crypto";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { generateScriptAudio, MAX_SCRIPT_CHARS } from "./scriptAudio";
+import { defaultModel, EngineRegistry, generateScriptAudio, MAX_SCRIPT_CHARS } from "./scriptAudio";
+import { geminiEngine } from "./engines/gemini";
+import { openRouterEngine } from "./engines/openrouter";
+import { availableModels } from "./ttsCatalog";
+import { pcmDurationSeconds } from "./audio";
 import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
 import {
   buildProjectZip,
@@ -37,6 +41,18 @@ function getGeminiClient(): GoogleGenAI {
   return ai;
 }
 
+// Motores de voz disponibles según las claves configuradas (se leen en cada uso, después de dotenv).
+const engines: EngineRegistry = {
+  gemini: geminiEngine(getGeminiClient),
+  openrouter: openRouterEngine(() => {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) throw new Error("Falta la variable de entorno OPENROUTER_API_KEY.");
+    return { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined };
+  }),
+};
+
+const cleanModel = (model: unknown) => (typeof model === "string" && model.trim() ? model.trim().slice(0, 200) : undefined);
+
 const app = express();
 
 function safeEqual(a: string, b: string): boolean {
@@ -61,9 +77,21 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+app.get("/api/tts/models", async (_req, res) => {
+  try {
+    res.json({
+      defaultModel: defaultModel(),
+      configured: { openrouter: !!process.env.OPENROUTER_API_KEY, gemini: !!process.env.GEMINI_API_KEY },
+      models: await availableModels(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "No se pudo obtener la lista de modelos." });
+  }
+});
+
 app.post("/api/script-audio", async (req, res) => {
   try {
-    const { script, voices, direction } = req.body;
+    const { script, voices, direction, model } = req.body;
     if (typeof script !== "string" || !script.trim()) {
       return res.status(400).json({ error: "El guion está vacío." });
     }
@@ -71,8 +99,9 @@ app.post("/api/script-audio", async (req, res) => {
       return res.status(400).json({ error: `El guion supera el máximo de ${MAX_SCRIPT_CHARS} caracteres.` });
     }
 
-    const { wav, blocks, speakers } = await generateScriptAudio(getGeminiClient(), {
+    const { wav, blocks, speakers } = await generateScriptAudio(engines, {
       script,
+      model: cleanModel(model),
       voices: voices && typeof voices === "object" ? voices : {},
       direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : undefined,
     });
@@ -117,13 +146,14 @@ app.get("/api/projects", async (_req, res) => {
 
 app.post("/api/projects", async (req, res) => {
   try {
-    const { name, source, direction } = req.body;
+    const { name, source, direction, model } = req.body;
     if (typeof source !== "string" || !source.trim()) return res.status(400).json({ error: "Pega el guion del proyecto." });
     if (source.length > MAX_SOURCE_CHARS) return res.status(400).json({ error: `El guion supera el máximo de ${MAX_SOURCE_CHARS} caracteres.` });
     const project = await createProject({
       name: typeof name === "string" ? name : "",
       source,
       direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : "",
+      model: cleanModel(model),
     });
     res.status(201).json(viewOf(project));
   } catch (error: any) {
@@ -141,11 +171,12 @@ app.get("/api/projects/:id", async (req, res) => {
 
 app.patch("/api/projects/:id", async (req, res) => {
   try {
-    const { name, direction, voices, sections } = req.body;
+    const { name, direction, voices, sections, model } = req.body;
     const project = await updateProject(req.params.id, {
       name,
       direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : undefined,
       voices,
+      model: cleanModel(model),
       sections: Array.isArray(sections) ? sections : undefined,
     });
     res.json(viewOf(project));
@@ -176,11 +207,16 @@ app.post("/api/projects/:id/sections/:sectionId/generate", async (req, res) => {
     const section = project.sections.find((s) => s.id === sectionId)!;
     const fingerprint = renderFingerprint(project, section);
     try {
-      const { wav } = await generateScriptAudio(getGeminiClient(), { script: section.script, voices: project.voices, direction: project.direction });
+      const { wav } = await generateScriptAudio(engines, {
+        script: section.script,
+        voices: project.voices,
+        direction: project.direction,
+        model: project.model,
+      });
       await saveSectionAudio(id, sectionId, wav);
       const updated = await updateSection(id, sectionId, (s) => {
         s.status = "done";
-        s.durationSec = Math.round(((wav.length - 44) / 48000) * 10) / 10;
+        s.durationSec = Math.round(pcmDurationSeconds(wav.length - 44) * 10) / 10;
         s.renderedFrom = fingerprint;
         s.generatedAt = new Date().toISOString();
       });

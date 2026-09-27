@@ -28,6 +28,8 @@ export interface Project {
   name: string;
   direction: string;
   voices: Record<string, string>;
+  // Modelo de voz (p. ej. "google/gemini-3.8-flash-tts" en OpenRouter); vacío = el predeterminado del servidor.
+  model?: string;
   sections: ProjectSection[];
   createdAt: string;
   updatedAt: string;
@@ -54,8 +56,10 @@ function audioPath(projectId: string, sectionId: string): string {
 
 export class NotFoundError extends Error {}
 
-export function renderFingerprint(project: Pick<Project, "direction" | "voices">, section: Pick<ProjectSection, "script">): string {
-  return createHash("sha1").update(JSON.stringify([section.script, project.direction, project.voices])).digest("hex");
+export function renderFingerprint(project: Pick<Project, "direction" | "voices" | "model">, section: Pick<ProjectSection, "script">): string {
+  const inputs: unknown[] = [section.script, project.direction, project.voices];
+  if (project.model) inputs.push(project.model);
+  return createHash("sha1").update(JSON.stringify(inputs)).digest("hex");
 }
 
 // isActive indica qué secciones se están generando de verdad en este proceso: si el servidor se reinició
@@ -119,7 +123,7 @@ export async function getProject(id: string): Promise<Project> {
   return readProject(id);
 }
 
-export async function createProject(input: { name: string; source: string; direction?: string }): Promise<Project> {
+export async function createProject(input: { name: string; source: string; direction?: string; model?: string }): Promise<Project> {
   const imported = importTechnicalScript(input.source);
   if (!imported.length) throw new Error("No se encontró texto para locutar en el guion.");
   const now = new Date().toISOString();
@@ -128,6 +132,7 @@ export async function createProject(input: { name: string; source: string; direc
     name: input.name.trim() || "Proyecto sin nombre",
     direction: input.direction ?? "",
     voices: {},
+    model: input.model,
     sections: imported.map((s) => ({ id: randomUUID(), title: s.title, script: s.script, cues: s.cues, status: "pending" })),
     createdAt: now,
     updatedAt: now,
@@ -140,6 +145,7 @@ export interface ProjectPatch {
   name?: string;
   direction?: string;
   voices?: Record<string, string>;
+  model?: string;
   sections?: { id: string; title?: string; script?: string }[];
 }
 
@@ -149,6 +155,7 @@ export function updateProject(id: string, patch: ProjectPatch): Promise<Project>
     if (typeof patch.name === "string" && patch.name.trim()) project.name = patch.name.trim();
     if (typeof patch.direction === "string") project.direction = patch.direction;
     if (patch.voices && typeof patch.voices === "object") project.voices = patch.voices;
+    if (typeof patch.model === "string" && patch.model.trim()) project.model = patch.model.trim();
     for (const change of patch.sections ?? []) {
       const section = project.sections.find((s) => s.id === change.id);
       if (!section) continue;
@@ -215,6 +222,7 @@ export function productionSheet(project: Project): string {
     for (const cue of s.cues) lines.push(`   ${cue.kind}: ${cue.description}`);
     lines.push("");
   });
+  if (project.model) lines.push(`MODELO DE VOZ: ${project.model}`, "");
   if (project.direction.trim()) lines.push("DIRECCIÓN DE VOZ", project.direction.trim(), "");
   return lines.join("\n");
 }

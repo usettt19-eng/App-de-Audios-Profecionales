@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AudioLines, Download, FileUp, Loader2, Sparkles, Users, Clock, Layers, AlertCircle } from "lucide-react";
 import { buildRenderPlan, estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
-import { chipButtonClass, DirectionPanel, formatDuration, panelClass, Stat, useParsedDirection, VoiceCast, withDefaultVoices } from "./voiceControls";
+import { engineForModel } from "../lib/ttsModels";
+import {
+  chipButtonClass, DirectionPanel, formatDuration, ModelPicker, panelClass, Stat, useParsedDirection, useTtsCatalog, VoiceCast, voicesForModel, withDefaultVoices,
+} from "./voiceControls";
 
 const TEMPLATES: { label: string; style: string; script: string }[] = [
   {
@@ -57,6 +60,10 @@ export default function AudioScriptStudio() {
   const [script, setScript] = useState<string>(TEMPLATES[0].script);
   const [direction, setDirection] = useState<string>(TEMPLATES[0].style);
   const [voices, setVoices] = useState<Record<string, string>>({});
+  const catalog = useTtsCatalog();
+  const [chosenModel, setChosenModel] = useState<string | null>(null);
+  const model = chosenModel ?? catalog?.defaultModel ?? "";
+  const available = voicesForModel(catalog, model);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -72,14 +79,18 @@ export default function AudioScriptStudio() {
     [script, parsedDirection]
   );
   const speakers = useMemo(() => listSpeakers(segments), [segments]);
-  const blockCount = useMemo(() => buildRenderPlan(segments).filter((s) => s.type === "block").length, [segments]);
+  // OpenRouter genera una voz por solicitud; Gemini directo, hasta dos.
+  const blockCount = useMemo(
+    () => buildRenderPlan(segments, engineForModel(model) === "openrouter" ? { maxSpeakersPerBlock: 1, maxBlockChars: 3000 } : {}).filter((s) => s.type === "block").length,
+    [segments, model]
+  );
   const lineCount = segments.filter((s) => s.type === "line").length;
   const pauseCount = segments.filter((s) => s.type === "pause").length;
   const estimatedSeconds = estimateDurationSeconds(segments) * (100 / (parsedDirection?.speedPercent || 100));
 
   useEffect(() => {
-    setVoices((prev) => withDefaultVoices(prev, speakers, parsedDirection?.suggestedVoice));
-  }, [speakers]); // La voz sugerida solo se usa para personajes nuevos, no al editar el prompt.
+    setVoices((prev) => withDefaultVoices(prev, speakers, parsedDirection?.suggestedVoice, available));
+  }, [speakers, available]); // La voz sugerida solo se usa para personajes nuevos, no al editar el prompt.
 
   useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); }, [audioUrl]);
 
@@ -98,7 +109,7 @@ export default function AudioScriptStudio() {
       const res = await fetch("/api/script-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, voices, direction }),
+        body: JSON.stringify({ script, voices, direction, model }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -151,10 +162,18 @@ export default function AudioScriptStudio() {
         <DirectionPanel
           value={direction}
           onChange={setDirection}
-          onApplySuggestedVoice={(voice) => setVoices(Object.fromEntries(speakers.map((sp) => [sp, voice])))}
+          onApplySuggestedVoice={
+            available.some((v) => v.name === parsedDirection?.suggestedVoice) ? (voice) => setVoices(Object.fromEntries(speakers.map((sp) => [sp, voice]))) : undefined
+          }
         />
 
-        <VoiceCast speakers={speakers} voices={voices} onChange={setVoices}>
+        <VoiceCast
+          speakers={speakers}
+          voices={voices}
+          onChange={setVoices}
+          available={available}
+          header={<ModelPicker catalog={catalog} value={model} onChange={setChosenModel} />}
+        >
           <button
             onClick={handleGenerate}
             disabled={loading || !lineCount}

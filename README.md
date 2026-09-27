@@ -1,12 +1,12 @@
 # App de Audios Profesionales
 
-Convierte guiones profesionales en locuciones con una voz distinta por personaje, usando Gemini TTS.
+Convierte guiones profesionales en locuciones con una voz distinta por personaje. Usa los modelos de voz de [OpenRouter](https://openrouter.ai) (una sola clave para Gemini TTS, Kokoro, Fish Audio y otros) y, opcionalmente, Gemini directo de Google.
 
 ## Inicio rápido
 
 ```bash
 npm install
-cp .env.example .env   # agrega tu GEMINI_API_KEY
+cp .env.example .env   # agrega tu OPENROUTER_API_KEY
 npm run dev            # http://localhost:3000
 ```
 
@@ -68,6 +68,22 @@ Esta línea sin nombre continúa con la DIRECTORA.
 
 Los nombres de personaje se reconocen si están en MAYÚSCULAS o tienen una o dos palabras, para no confundir frases como "Recuerden lo siguiente: ...".
 
+## Motores y modelos de voz
+
+| Modelo | Motor | Voces | Entiende tono/acotaciones |
+|---|---|---|---|
+| `google/gemini-3.8-flash-tts` (por defecto) | OpenRouter | 30 voces Gemini (Charon, Kore, Sulafat...) | Sí |
+| `google/gemini-3.1-flash-tts-preview`, `google/gemini-3.8-flash-lite-tts` | OpenRouter | 30 voces Gemini | Sí |
+| Otros de OpenRouter (Kokoro, Fish Audio...) | OpenRouter | Las que publica OpenRouter para cada modelo | No: solo texto, voz y velocidad |
+| `gemini-2.5-flash-preview-tts`, `gemini-2.5-pro-preview-tts` | Gemini directo | 30 voces Gemini | Sí, con dos voces por solicitud |
+
+- El modelo se elige en cada proyecto (y en el audio rápido). La lista combina los modelos conocidos con los que publica la API de modelos de OpenRouter, incluidas sus voces; también se puede escribir cualquier otro `proveedor/modelo`.
+- Los identificadores con `/` van por OpenRouter; los demás, por Gemini directo. Solo aparecen los motores con clave configurada.
+- OpenRouter genera una voz por solicitud: en diálogos, cada intervención se genera aparte y se une en orden.
+- A los modelos que no entienden indicaciones de tono se les quitan las acotaciones para que no las lean en voz alta.
+- La velocidad del prompt se envía como `speed`; si el modelo no la acepta, se reintenta sin ella.
+- El audio se pide en WAV y se convierte a 24 kHz mono (cualquier frecuencia o canales). Los modelos que solo entregan MP3 no son compatibles.
+
 ## Prompt de dirección de voz
 
 Pega en el panel **Prompt de dirección de voz** las indicaciones de narración, aunque estén escritas para otras plataformas (ElevenLabs, Play.ht, etc.). Por ejemplo:
@@ -80,12 +96,12 @@ Voz: masculina, adulta, tono grave/cálido de documental (español latino, NO to
 - Pausas: añade [pausa] de 0.5s después de cada dato numérico o afirmación de escala
 ```
 
-La app lo traduce a lo que Gemini TTS entiende:
+La app lo traduce a lo que entiende el modelo de voz:
 
 | Indicación | Cómo se aplica |
 |---|---|
 | Género y tono (grave, cálido, documental, solemne...) | Sugiere una voz de Gemini acorde (p. ej. Charon, Gacrux, Sulafat) |
-| Velocidad (%) | Instrucción de ritmo al modelo (Gemini no tiene un parámetro de velocidad) |
+| Velocidad (%) | Parámetro `speed` en OpenRouter e instrucción de ritmo en los modelos que la entienden |
 | Estabilidad / estilo | Instrucciones de interpretación (consistente, sobria, expresiva...) |
 | Acento (latino, España) | Instrucción de acento |
 | Pausas tras cifras | Silencios exactos insertados en el audio tras cada frase con números o escalas |
@@ -97,23 +113,41 @@ Los prompts se pueden guardar con un nombre (en el navegador) para reutilizarlos
 ## Cómo funciona
 
 1. `src/lib/scriptParser.ts` convierte el guion en líneas y pausas, y las agrupa en bloques de hasta 2 voces (límite de Gemini multi-speaker).
-2. `server/scriptAudio.ts` genera cada bloque con Gemini TTS (hasta 3 en paralelo), inserta los silencios y une todo en un WAV (PCM 16 bits, 24 kHz, mono).
+2. `server/scriptAudio.ts` genera cada bloque con el motor del modelo elegido (`server/engines/openrouter.ts` o `server/engines/gemini.ts`, hasta 3 en paralelo), inserta los silencios y une todo en un WAV (PCM 16 bits, 24 kHz, mono).
 3. `src/lib/voiceDirection.ts` interpreta el prompt de dirección de voz.
 4. `src/lib/technicalScript.ts` divide un guion técnico en bloques y lo convierte al formato interno.
 5. `server/projects.ts` guarda proyectos y audios; `server/zip.ts` arma el ZIP.
 
 API:
 
-- `POST /api/script-audio` `{ script, voices, direction }` → `audio/wav`
+- `GET /api/tts/models` → modelo por defecto, motores configurados y modelos con sus voces
+- `POST /api/script-audio` `{ script, voices, direction, model }` → `audio/wav`
 - `GET/POST /api/projects`, `GET/PATCH/DELETE /api/projects/:id`
 - `POST /api/projects/:id/sections/:sectionId/generate`
 - `GET /api/projects/:id/sections/:sectionId/audio` (`?download=1` para descargar)
 - `GET /api/projects/:id/zip`
 
-El audio rápido admite guiones de hasta 20.000 caracteres y los proyectos hasta 300.000. Modelo configurable con `GEMINI_TTS_MODEL`. Las solicitudes a Gemini se reintentan hasta 3 veces ante límites de cuota o errores temporales.
+El audio rápido admite guiones de hasta 20.000 caracteres y los proyectos hasta 300.000. Modelo por defecto configurable con `OPENROUTER_TTS_MODEL`. Las solicitudes de voz se reintentan hasta 3 veces ante límites de cuota o errores temporales.
 
 ## Scripts
 
 - `npm run dev`: servidor con Vite en modo desarrollo
 - `npm run lint`: verificación de tipos
 - `npm test`: tests del parser, del importador de guiones técnicos, del prompt de dirección, de los proyectos y del ensamblado de audio (sin llamar a la API)
+
+## Despliegue automático en un servidor
+
+Cada push a `main` se compila, se prueba y se instala en el servidor por SSH (`.github/workflows/deploy.yml` + `scripts/remote-deploy.sh`). La primera vez el script instala Node.js 22, crea el usuario `audios`, deja la app en `/opt/audios-pro` como servicio `audios-pro` (systemd) y guarda los proyectos en `/var/lib/audios-pro/projects`. Si la nueva versión no responde, vuelve a la anterior.
+
+Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables → Actions):
+
+| Secret | Valor |
+|---|---|
+| `SSH_HOST` | IP del servidor |
+| `SSH_USER` | Usuario SSH con permisos de root (por defecto `root`) |
+| `SSH_PRIVATE_KEY` | Contenido completo de la clave privada (`.pem`) |
+| `OPENROUTER_API_KEY` | Clave de OpenRouter |
+| `APP_PASSWORD` | Contraseña de acceso a la app (usuario `admin`, o el de `APP_USER`) |
+| `OPENROUTER_TTS_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
+
+Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:3000` (abre ese puerto en el firewall o pon Nginx delante).

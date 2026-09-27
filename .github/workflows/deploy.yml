@@ -58,6 +58,8 @@ jobs:
       - name: Preparar variables de entorno
         if: steps.config.outputs.skip != 'true'
         env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_TTS_MODEL: ${{ secrets.OPENROUTER_TTS_MODEL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_TTS_MODEL: ${{ secrets.GEMINI_TTS_MODEL }}
           APP_USER: ${{ secrets.APP_USER }}
@@ -65,7 +67,7 @@ jobs:
         run: |
           umask 077
           : > audios-pro.env
-          for name in GEMINI_API_KEY GEMINI_TTS_MODEL APP_USER APP_PASSWORD; do
+          for name in OPENROUTER_API_KEY OPENROUTER_TTS_MODEL GEMINI_API_KEY GEMINI_TTS_MODEL APP_USER APP_PASSWORD; do
             value="${!name}"
             if [ -n "$value" ]; then echo "${name}=${value}" >> audios-pro.env; fi
           done

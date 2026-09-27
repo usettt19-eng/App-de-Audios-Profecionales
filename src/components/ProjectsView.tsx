@@ -6,7 +6,9 @@ import { estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scrip
 import { importTechnicalScript } from "../lib/technicalScript";
 import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
-import { chipButtonClass, DirectionPanel, formatDuration, panelClass, Stat, VoiceCast, withDefaultVoices } from "./voiceControls";
+import {
+  chipButtonClass, DirectionPanel, formatDuration, ModelPicker, panelClass, Stat, useTtsCatalog, VoiceCast, voicesForModel, withDefaultVoices,
+} from "./voiceControls";
 
 interface ProductionCue {
   kind: string;
@@ -30,6 +32,7 @@ interface Project {
   name: string;
   direction: string;
   voices: Record<string, string>;
+  model?: string;
   sections: Section[];
   updatedAt: string;
 }
@@ -113,6 +116,9 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const catalog = useTtsCatalog();
+  const [chosenModel, setChosenModel] = useState<string | null>(null);
+  const model = chosenModel ?? catalog?.defaultModel ?? "";
 
   const preview = useMemo(() => (source.trim() ? importTechnicalScript(source) : []), [source]);
 
@@ -128,7 +134,7 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
     setCreating(true);
     setError(null);
     try {
-      const project = await api<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name, source, direction }) });
+      const project = await api<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name, source, direction, model }) });
       onCreated(project.id);
     } catch (e: any) {
       setError(e.message);
@@ -172,6 +178,9 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
       </div>
 
       <div className="lg:col-span-5 flex flex-col gap-4">
+        <div className={panelClass}>
+          <ModelPicker catalog={catalog} value={model} onChange={setChosenModel} />
+        </div>
         <DirectionPanel value={direction} onChange={setDirection} />
 
         <div className={panelClass}>
@@ -208,7 +217,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const stopRequested = useRef(false);
   const pendingSave = useRef<Promise<unknown>>(Promise.resolve());
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const latestSettings = useRef<{ direction: string; voices: Record<string, string> } | null>(null);
+  const latestSettings = useRef<{ direction: string; voices: Record<string, string>; model?: string } | null>(null);
+  const catalog = useTtsCatalog();
 
   useEffect(() => {
     api<Project>(`/api/projects/${id}`).then(setProject).catch((e) => setError(e.message));
@@ -221,6 +231,8 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }, [project?.sections]);
 
   const direction = project ? parseVoiceDirection(project.direction) : undefined;
+  const model = project?.model || catalog?.defaultModel || "";
+  const available = voicesForModel(catalog, model);
 
   const flushSave = useCallback(() => {
     clearTimeout(saveTimer.current);
@@ -236,11 +248,11 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }, [id]);
 
   // Los cambios de dirección y reparto se guardan solos, agrupados tras una breve pausa al escribir.
-  const updateSettings = (patch: Partial<Pick<Project, "direction" | "voices">>) => {
+  const updateSettings = (patch: Partial<Pick<Project, "direction" | "voices" | "model">>) => {
     setProject((prev) => {
       if (!prev) return prev;
       const next = { ...prev, ...patch };
-      latestSettings.current = { direction: next.direction, voices: next.voices };
+      latestSettings.current = { direction: next.direction, voices: next.voices, model: next.model || undefined };
       return next;
     });
     clearTimeout(saveTimer.current);
@@ -251,10 +263,10 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
   useEffect(() => {
     if (project && speakers.length) {
-      const voices = withDefaultVoices(project.voices, speakers, direction?.suggestedVoice);
+      const voices = withDefaultVoices(project.voices, speakers, direction?.suggestedVoice, available);
       if (voices !== project.voices) updateSettings({ voices });
     }
-  }, [speakers, project?.id]); // La voz sugerida solo se usa para personajes nuevos.
+  }, [speakers, project?.id, available]); // La voz sugerida solo se usa para personajes nuevos.
 
   const applyServerSections = (p: Project) => setProject((prev) => (prev ? { ...prev, sections: p.sections } : p));
 
@@ -376,10 +388,20 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
           <DirectionPanel
             value={project.direction}
             onChange={(value) => updateSettings({ direction: value })}
-            onApplySuggestedVoice={(voice) => updateSettings({ voices: Object.fromEntries(speakers.map((sp) => [sp, voice])) })}
+            onApplySuggestedVoice={
+              available.some((v) => v.name === direction?.suggestedVoice)
+                ? (voice) => updateSettings({ voices: Object.fromEntries(speakers.map((sp) => [sp, voice])) })
+                : undefined
+            }
           />
-          <VoiceCast speakers={speakers} voices={project.voices} onChange={(voices) => updateSettings({ voices })}>
-            <p className="text-[10px] text-slate-500">Los cambios de dirección o voces marcan como desactualizados los audios ya generados.</p>
+          <VoiceCast
+            speakers={speakers}
+            voices={project.voices}
+            onChange={(voices) => updateSettings({ voices })}
+            available={available}
+            header={<ModelPicker catalog={catalog} value={model} onChange={(m) => updateSettings({ model: m })} />}
+          >
+            <p className="text-[10px] text-slate-500">Los cambios de modelo, dirección o voces marcan como desactualizados los audios ya generados.</p>
           </VoiceCast>
         </div>
       </div>

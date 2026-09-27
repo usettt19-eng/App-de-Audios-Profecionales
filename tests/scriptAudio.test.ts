@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { generateScriptAudio } from "../server/scriptAudio";
+import { generateScriptAudio as generate, ScriptAudioRequest } from "../server/scriptAudio";
+import { geminiEngine } from "../server/engines/gemini";
+
+// Estos tests cubren el motor de Gemini directo; los de OpenRouter están en openrouter.test.ts.
+const generateScriptAudio = (client: any, req: ScriptAudioRequest) =>
+  generate({ gemini: geminiEngine(() => client) }, { model: "gemini-2.5-flash-preview-tts", ...req });
 
 function mockClient(calls: any[]) {
   return {
