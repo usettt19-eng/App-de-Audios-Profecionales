@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Loader2, RotateCcw, Sparkles, Square } from "lucide-react";
-import { DEFAULT_SCRIPT_PROMPT, OUTPUT_FORMAT_RULES, wordsForDuration } from "../lib/scriptTemplates";
+import { OUTPUT_FORMAT_RULES, wordsForDuration } from "../lib/scriptTemplates";
 import { ErrorNote } from "./AudioScriptStudio";
 import { chipButtonClass } from "./voiceControls";
 
@@ -11,26 +11,8 @@ interface TextModel {
   recommended?: boolean;
 }
 
-const PROMPT_KEY = "audios-pro:prompt-guion";
 const inputClass =
   "bg-slate-950 border border-slate-800 rounded-md px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60";
-
-function loadPrompt(): string {
-  try {
-    return localStorage.getItem(PROMPT_KEY) || DEFAULT_SCRIPT_PROMPT;
-  } catch {
-    return DEFAULT_SCRIPT_PROMPT;
-  }
-}
-
-function storePrompt(value: string) {
-  try {
-    if (value === DEFAULT_SCRIPT_PROMPT) localStorage.removeItem(PROMPT_KEY);
-    else localStorage.setItem(PROMPT_KEY, value);
-  } catch {
-    // Sin almacenamiento: el prompt editado dura solo esta sesión.
-  }
-}
 
 function costLabel(cost?: number): string {
   if (cost === undefined) return "";
@@ -38,21 +20,32 @@ function costLabel(cost?: number): string {
   return cost < 0.01 ? " · < $0.01/guion" : ` · ~$${cost.toFixed(2)}/guion`;
 }
 
+export interface ScriptPreset {
+  titulo: string;
+  template: string;
+  duracion: string;
+  segmentos: string;
+}
+
 // Genera el guion con un modelo de texto de OpenRouter y lo va escribiendo en vivo en el editor del proyecto.
+// Los valores iniciales vienen del formato elegido; los cambios aquí solo afectan a esta generación
+// (para cambiarlos siempre, se edita el formato en Ideas).
 export default function ScriptGenerator({
+  preset,
   onStart,
   onText,
   onDone,
 }: {
+  preset: ScriptPreset;
   onStart: (titulo: string) => void;
   onText: (text: string) => void;
   onDone: () => void;
 }) {
-  const [titulo, setTitulo] = useState("LAS CONSTRUCCIONES MÁS IMPOSIBLES JAMÁS HECHAS | Documental 4K");
+  const [titulo, setTitulo] = useState(preset.titulo);
   const [tema, setTema] = useState("");
-  const [duracion, setDuracion] = useState("25-30");
-  const [segmentos, setSegmentos] = useState("12 a 15");
-  const [template, setTemplate] = useState(loadPrompt);
+  const [duracion, setDuracion] = useState(preset.duracion);
+  const [segmentos, setSegmentos] = useState(preset.segmentos);
+  const [template, setTemplate] = useState(preset.template);
   const [showPrompt, setShowPrompt] = useState(false);
   const [models, setModels] = useState<TextModel[]>([]);
   const [model, setModel] = useState("");
@@ -72,10 +65,7 @@ export default function ScriptGenerator({
     return () => abortRef.current?.abort();
   }, []);
 
-  const updateTemplate = (value: string) => {
-    setTemplate(value);
-    storePrompt(value);
-  };
+  const updateTemplate = (value: string) => setTemplate(value);
 
   const generate = async () => {
     setError(null);
@@ -172,7 +162,7 @@ export default function ScriptGenerator({
 
       <button onClick={() => setShowPrompt((v) => !v)} className={`${chipButtonClass} self-start`}>
         {showPrompt ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />} Prompt del guion
-        {template !== DEFAULT_SCRIPT_PROMPT && <span className="text-fuchsia-300">(editado)</span>}
+        {template !== preset.template && <span className="text-fuchsia-300">(editado)</span>}
       </button>
       {showPrompt && (
         <div className="flex flex-col gap-1.5">
@@ -185,16 +175,16 @@ export default function ScriptGenerator({
           <p className="text-[10px] text-slate-500 leading-relaxed">
             Variables: <code className="text-fuchsia-300">{"{titulo}"}</code> <code className="text-fuchsia-300">{"{tema}"}</code>{" "}
             <code className="text-fuchsia-300">{"{duracion}"}</code> <code className="text-fuchsia-300">{"{palabras}"}</code>{" "}
-            <code className="text-fuchsia-300">{"{segmentos}"}</code>. Los cambios se guardan en este navegador. Al final se añaden siempre las reglas de
-            formato que la app necesita para dividir el guion en bloques.
+            <code className="text-fuchsia-300">{"{segmentos}"}</code>. Los cambios valen solo para esta generación; para guardarlos, edita el formato en
+            Ideas. Al final se añaden siempre las reglas de formato que la app necesita para dividir el guion en bloques.
           </p>
           <details className="text-[10px] text-slate-500">
             <summary className="cursor-pointer">Ver reglas de formato fijas</summary>
             <pre className="whitespace-pre-wrap mt-1 font-mono">{OUTPUT_FORMAT_RULES}</pre>
           </details>
-          {template !== DEFAULT_SCRIPT_PROMPT && (
-            <button onClick={() => updateTemplate(DEFAULT_SCRIPT_PROMPT)} className={`${chipButtonClass} self-start`}>
-              <RotateCcw className="w-3 h-3" /> Restaurar prompt original
+          {template !== preset.template && (
+            <button onClick={() => updateTemplate(preset.template)} className={`${chipButtonClass} self-start`}>
+              <RotateCcw className="w-3 h-3" /> Restaurar prompt del formato
             </button>
           )}
         </div>

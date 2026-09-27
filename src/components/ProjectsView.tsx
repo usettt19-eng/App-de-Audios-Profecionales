@@ -8,6 +8,7 @@ import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
 import ScriptGenerator from "./ScriptGenerator";
 import { DOCUMENTARY_VOICE_DIRECTION } from "../lib/scriptTemplates";
+import { BUILTIN_FORMAT_ID, ProductionFormat } from "../lib/formats";
 import {
   chipButtonClass, DirectionPanel, formatDuration, ModelPicker, panelClass, Stat, useTtsCatalog, VoiceCast, voicesForModel, withDefaultVoices,
 } from "./voiceControls";
@@ -58,10 +59,10 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 const primaryButtonClass =
   "px-4 py-2 rounded-lg text-xs font-bold flex items-center justify-center gap-2 bg-fuchsia-600 text-white hover:bg-fuchsia-500 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer";
 
-export default function ProjectsView() {
-  const [view, setView] = useState<{ kind: "list" } | { kind: "new" } | { kind: "project"; id: string }>({ kind: "list" });
+export default function ProjectsView({ initialFormatId }: { initialFormatId?: string }) {
+  const [view, setView] = useState<{ kind: "list" } | { kind: "new" } | { kind: "project"; id: string }>(initialFormatId ? { kind: "new" } : { kind: "list" });
 
-  if (view.kind === "new") return <NewProject onCancel={() => setView({ kind: "list" })} onCreated={(id) => setView({ kind: "project", id })} />;
+  if (view.kind === "new") return <NewProject initialFormatId={initialFormatId} onCancel={() => setView({ kind: "list" })} onCreated={(id) => setView({ kind: "project", id })} />;
   if (view.kind === "project") return <ProjectDetail id={view.id} onBack={() => setView({ kind: "list" })} />;
   return <ProjectList onNew={() => setView({ kind: "new" })} onOpen={(id) => setView({ kind: "project", id })} />;
 }
@@ -111,7 +112,14 @@ function ProjectList({ onNew, onOpen }: { onNew: () => void; onOpen: (id: string
   );
 }
 
-function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: (id: string) => void }) {
+function NewProject({ initialFormatId, onCancel, onCreated }: { initialFormatId?: string; onCancel: () => void; onCreated: (id: string) => void }) {
+  const [formats, setFormats] = useState<ProductionFormat[]>([]);
+  const [formatId, setFormatId] = useState(initialFormatId || BUILTIN_FORMAT_ID);
+  const format = formats.find((f) => f.id === formatId);
+
+  useEffect(() => {
+    api<ProductionFormat[]>("/api/formats").then(setFormats).catch(() => undefined);
+  }, []);
   const [name, setName] = useState("");
   const [source, setSource] = useState("");
   const [direction, setDirection] = useState("");
@@ -122,13 +130,24 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const catalog = useTtsCatalog();
 
-  // Al generar con IA: nombre del proyecto a partir del título y dirección de voz del proceso documental.
+  // Al generar con IA: nombre del proyecto a partir del título y dirección de voz del formato elegido.
   const startGeneration = (titulo: string) => {
     setWriting(true);
     setSource("");
     setName((current) => current || titulo.replace(/\s*\|.*$/, "").trim() || titulo);
-    setDirection((current) => current || DOCUMENTARY_VOICE_DIRECTION);
+    setDirection((current) => current || format?.direccionVoz || DOCUMENTARY_VOICE_DIRECTION);
   };
+
+  const chooseFormat = (id: string) => {
+    setFormatId(id);
+    const chosen = formats.find((f) => f.id === id);
+    if (chosen) setDirection(chosen.direccionVoz);
+  };
+
+  // La dirección de voz del formato se aplica al cargarlo (si todavía no se escribió otra).
+  useEffect(() => {
+    if (format) setDirection((current) => current || format.direccionVoz);
+  }, [format?.id]);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const model = chosenModel ?? catalog?.defaultModel ?? "";
 
@@ -146,7 +165,7 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
     setCreating(true);
     setError(null);
     try {
-      const project = await api<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name, source, direction, model }) });
+      const project = await api<Project>("/api/projects", { method: "POST", body: JSON.stringify({ name, source, direction, model, formatId: mode === "ai" ? formatId : undefined }) });
       onCreated(project.id);
     } catch (e: any) {
       setError(e.message);
@@ -178,7 +197,31 @@ function NewProject({ onCancel, onCreated }: { onCancel: () => void; onCreated: 
             </button>
           ))}
         </div>
-        {mode === "ai" && <ScriptGenerator onStart={startGeneration} onText={setSource} onDone={() => setWriting(false)} />}
+        {mode === "ai" && (
+          <label className="flex items-center justify-between gap-3">
+            <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Formato</span>
+            <select
+              value={formatId}
+              onChange={(e) => chooseFormat(e.target.value)}
+              disabled={writing}
+              className="min-w-0 flex-1 max-w-md bg-slate-950 border border-slate-800 rounded-md px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+            >
+              {formats.length === 0 && <option value={formatId}>Cargando…</option>}
+              {formats.map((f) => (
+                <option key={f.id} value={f.id}>{f.nombre}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        {mode === "ai" && format && (
+          <ScriptGenerator
+            key={format.id + format.updatedAt}
+            preset={{ titulo: format.titulo, template: format.promptGuion, duracion: format.duracion, segmentos: format.segmentos }}
+            onStart={startGeneration}
+            onText={setSource}
+            onDone={() => setWriting(false)}
+          />
+        )}
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Guion completo {mode === "ai" && "(editable)"}</span>
           {mode === "paste" && (

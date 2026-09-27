@@ -12,15 +12,29 @@ npm run dev            # http://localhost:3000
 
 Producción: `npm run build && npm start`.
 
+## Ideas: de un canal de YouTube a un formato de producción
+
+La pestaña **Ideas** reproduce el primer paso del proceso: analizar un canal que funciona y adaptar su formato a un nicho con hueco.
+
+1. **Analizar:** escribe un canal (`https://www.youtube.com/@canal`, `@canal`, un id `UC…`) o una idea. La app aplica el prompt de análisis (editable): *"Analiza este canal de YouTube y dime cuál es el formato exacto que le está funcionando —no el tema, el patrón repetible: estructura, duración, tipo de gancho. Después dame 3 nichos distintos donde ese mismo formato casi no se esté usando todavía…"*.
+   - Con `YOUTUBE_API_KEY`, los datos del canal (videos más vistos y recientes, con título, duración, vistas y fecha) salen de la API de YouTube.
+   - Sin ella, el modelo los busca en la web (plugin web de OpenRouter, ~$4 por 1.000 resultados; se piden 8).
+2. **Elegir un nicho:** aparecen los 3 nichos con su "por qué tiene hueco", o puedes escribir otro.
+3. **Crear el proceso:** la app genera el **formato de producción** del nicho con la misma estructura que `proceso-documental-arquitectura.md` (análisis, prompt del guion, dirección de voz, plantillas de imagen con `{elemento}`, miniatura, título y checklist). Se guarda, se puede editar y descargar como `.md`.
+4. **Crear proyecto con este formato:** abre *Nuevo proyecto* con el generador de guiones y la dirección de voz ya configurados.
+
+El proceso "Construcciones Imposibles" viene cargado como primer formato (*Documental construcciones*). Los análisis y formatos se guardan junto a los proyectos (`research/` y `formats/` al lado de `DATA_DIR`).
+
 ## Guiones generados con IA
 
 En **Nuevo proyecto → Generar guion con IA** escribes el título del documental (y, si quieres, indicaciones adicionales, duración y número de estructuras) y la app escribe el guion completo con un modelo de texto de OpenRouter, en vivo, usando el prompt del proceso documental:
 
-- El prompt es editable (se guarda en el navegador) y admite las variables `{titulo}`, `{tema}`, `{duracion}`, `{palabras}` y `{segmentos}`.
+- El prompt es editable y admite las variables `{titulo}`, `{tema}`, `{duracion}`, `{palabras}` y `{segmentos}`.
 - Al final se añaden siempre unas reglas de formato fijas (`src/lib/scriptTemplates.ts`) para que el modelo marque cada bloque como `[BLOQUE N — NOMBRE]` con su música, tono y pausas, y la app pueda dividirlo en audios.
 - El modelo se elige de la lista de OpenRouter, con los recomendados primero y el costo aproximado por guion. Por defecto, el primero disponible entre Claude Sonnet/Opus, GPT-5 y Gemini 3 (o `OPENROUTER_TEXT_MODEL`).
 - Al generar, el nombre del proyecto sale del título y la dirección de voz se completa con la del proceso documental (voz grave de documental, 90-95 % de velocidad, pausas tras cifras y el prompt de estilo).
 - El guion se puede corregir antes de crear el proyecto.
+- El prompt, el título, la duración y los segmentos vienen del **formato** elegido (ver Ideas); los cambios en el generador valen solo para esa generación.
 
 ## Proyectos: varios audios de un mismo guion
 
@@ -130,6 +144,9 @@ Los prompts se pueden guardar con un nombre (en el navegador) para reutilizarlos
 
 API:
 
+- `POST /api/research/analyze` `{ input, template, model }` → análisis en streaming y, al final, el análisis guardado con sus nichos
+- `GET/DELETE /api/research[/:id]`, `POST /api/research/:id/process` `{ nicheIndex | niche, model }` → formato de producción
+- `GET/PATCH/DELETE /api/formats[/:id]`, `GET /api/formats/:id/markdown`
 - `GET /api/text-models` → modelos de texto de OpenRouter para escribir guiones
 - `POST /api/scripts/generate` `{ titulo, tema, duracion, segmentos, template, model }` → guion en texto plano, en streaming
 - `GET /api/tts/models` → modelo por defecto, motores configurados y modelos con sus voces
@@ -170,6 +187,7 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `APP_PASSWORD` | Contraseña de acceso a la app (usuario `admin`, o el de `APP_USER`) |
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
+| `YOUTUBE_API_KEY` | Opcional: datos exactos de canales para el análisis de Ideas |
 | `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
 Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.

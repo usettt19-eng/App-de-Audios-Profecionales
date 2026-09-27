@@ -30,6 +30,8 @@ export interface Project {
   voices: Record<string, string>;
   // Modelo de voz (p. ej. "google/gemini-3.8-flash-tts" en OpenRouter); vacío = el predeterminado del servidor.
   model?: string;
+  // Formato de producción con que se escribió el guion (para imágenes y miniatura).
+  formatId?: string;
   sections: ProjectSection[];
   createdAt: string;
   updatedAt: string;
@@ -123,7 +125,7 @@ export async function getProject(id: string): Promise<Project> {
   return readProject(id);
 }
 
-export async function createProject(input: { name: string; source: string; direction?: string; model?: string }): Promise<Project> {
+export async function createProject(input: { name: string; source: string; direction?: string; model?: string; formatId?: string }): Promise<Project> {
   const imported = importTechnicalScript(input.source);
   if (!imported.length) throw new Error("No se encontró texto para locutar en el guion.");
   const now = new Date().toISOString();
@@ -133,6 +135,7 @@ export async function createProject(input: { name: string; source: string; direc
     direction: input.direction ?? "",
     voices: {},
     model: input.model,
+    formatId: input.formatId,
     sections: imported.map((s) => ({ id: randomUUID(), title: s.title, script: s.script, cues: s.cues, status: "pending" })),
     createdAt: now,
     updatedAt: now,

@@ -83,9 +83,17 @@ export async function* readChatStream(body: ReadableStream<Uint8Array>): AsyncGe
   }
 }
 
-export async function streamScript(
-  options: { apiKey: string; baseUrl?: string; fetch?: typeof fetch; signal?: AbortSignal },
-  request: { model: string; prompt: string }
+export interface ChatOptions {
+  apiKey: string;
+  baseUrl?: string;
+  fetch?: typeof fetch;
+  signal?: AbortSignal;
+}
+
+// Llamada de chat en streaming. Con webSearch, OpenRouter busca en la web antes de responder (plugin "web").
+export async function streamChat(
+  options: ChatOptions,
+  request: { model: string; prompt: string; webSearch?: boolean; maxTokens?: number; temperature?: number }
 ): Promise<AsyncGenerator<string>> {
   const { apiKey, baseUrl = OPENROUTER_BASE_URL, fetch: doFetch = fetch, signal } = options;
   const res = await doFetch(`${baseUrl}/chat/completions`, {
@@ -94,9 +102,10 @@ export async function streamScript(
     body: JSON.stringify({
       model: request.model,
       stream: true,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      temperature: 0.8,
+      max_tokens: request.maxTokens ?? MAX_OUTPUT_TOKENS,
+      temperature: request.temperature ?? 0.8,
       messages: [{ role: "user", content: request.prompt }],
+      ...(request.webSearch ? { plugins: [{ id: "web", max_results: 8 }] } : {}),
     }),
     signal,
   });
@@ -111,4 +120,8 @@ export async function streamScript(
     throw new TtsError(`OpenRouter (${res.status}): ${message || res.statusText}`, res.status);
   }
   return readChatStream(res.body);
+}
+
+export function streamScript(options: ChatOptions, request: { model: string; prompt: string }): Promise<AsyncGenerator<string>> {
+  return streamChat(options, request);
 }

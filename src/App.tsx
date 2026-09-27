@@ -1,12 +1,21 @@
 import { useState } from "react";
-import { AudioLines, FolderOpen, Zap } from "lucide-react";
+import { AudioLines, FolderOpen, Lightbulb, Zap } from "lucide-react";
 import AudioScriptStudio from "./components/AudioScriptStudio";
+import IdeasView from "./components/IdeasView";
 import ProjectsView from "./components/ProjectsView";
 
-type Tab = "projects" | "quick";
+type Tab = "ideas" | "projects" | "quick";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("projects");
+  // Formato elegido en Ideas para abrir directamente "Nuevo proyecto" con él.
+  const [pendingFormat, setPendingFormat] = useState<{ id: string; at: number } | null>(null);
+
+  // Cambiar de pestaña a mano descarta el formato pendiente (solo se usa al venir desde Ideas).
+  const go = (next: Tab) => {
+    setPendingFormat(null);
+    setTab(next);
+  };
 
   const tabClass = (active: boolean) =>
     `px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-2 cursor-pointer ${
@@ -27,17 +36,29 @@ export default function App() {
             </div>
           </div>
           <nav className="flex gap-1 bg-slate-950 border border-slate-800 rounded-xl p-1">
-            <button onClick={() => setTab("projects")} className={tabClass(tab === "projects")}>
+            <button onClick={() => go("ideas")} className={tabClass(tab === "ideas")}>
+              <Lightbulb className="w-4 h-4" /> Ideas
+            </button>
+            <button onClick={() => go("projects")} className={tabClass(tab === "projects")}>
               <FolderOpen className="w-4 h-4" /> Proyectos
             </button>
-            <button onClick={() => setTab("quick")} className={tabClass(tab === "quick")}>
+            <button onClick={() => go("quick")} className={tabClass(tab === "quick")}>
               <Zap className="w-4 h-4" /> Audio rápido
             </button>
           </nav>
         </div>
       </header>
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6">
-        {tab === "projects" ? <ProjectsView /> : <AudioScriptStudio />}
+        {tab === "ideas" && (
+          <IdeasView
+            onUseFormat={(id) => {
+              setPendingFormat({ id, at: Date.now() });
+              setTab("projects");
+            }}
+          />
+        )}
+        {tab === "projects" && <ProjectsView key={pendingFormat?.at} initialFormatId={pendingFormat?.id} />}
+        {tab === "quick" && <AudioScriptStudio />}
       </main>
     </div>
   );

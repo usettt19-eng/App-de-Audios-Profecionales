@@ -9,6 +9,12 @@ import { openRouterEngine } from "./engines/openrouter";
 import { availableModels } from "./ttsCatalog";
 import { defaultTextModel, FALLBACK_TEXT_MODEL, listTextModels, streamScript } from "./scriptWriter";
 import { buildScriptPrompt } from "../src/lib/scriptTemplates";
+import { streamChat } from "./scriptWriter";
+import { channelDataToText, fetchChannelData, parseChannelRef } from "./youtube";
+import {
+  deleteFormat, deleteResearch, getFormat, getResearch, linkFormat, listFormats, listResearch, newFormatId, saveFormat, saveResearch, updateFormat,
+} from "./research";
+import { analysisBody, buildAnalysisPrompt, buildProcessPrompt, formatToMarkdown, Niche, parseNiches, parseProcess } from "../src/lib/formats";
 import { pcmDurationSeconds } from "./audio";
 import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
 import {
@@ -140,6 +146,199 @@ app.post("/api/scripts/generate", async (req, res) => {
   }
 });
 
+// --- Ideas: análisis de canales → nichos → formatos de producción ---
+
+// Envía el texto del modelo en vivo y, al terminar, un carácter NUL seguido de un JSON
+// {"type":"done",...} o {"type":"error","message":...}. La interfaz separa ambas partes.
+async function streamWithResult(
+  req: express.Request,
+  res: express.Response,
+  start: (signal: AbortSignal) => Promise<AsyncGenerator<string>>,
+  finish: (full: string) => Promise<Record<string, unknown>>
+) {
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+  let full = "";
+  try {
+    const chunks = await start(abort.signal);
+    res.set({ "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
+    res.flushHeaders();
+    for await (const text of chunks) {
+      full += text;
+      res.write(text);
+    }
+    res.end(`\u0000${JSON.stringify({ type: "done", ...(await finish(full)) })}`);
+  } catch (error: any) {
+    if (abort.signal.aborted) return;
+    console.error("Streaming Error:", error);
+    if (!res.headersSent) return res.status(502).json({ error: error.message || "Error al generar." });
+    res.end(`\u0000${JSON.stringify({ type: "error", message: error.message || "La generación se interrumpió." })}`);
+  }
+}
+
+function openRouterKey(res: express.Response): string | null {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+  return apiKey || null;
+}
+
+app.post("/api/research/analyze", async (req, res) => {
+  const { input, template, model } = req.body ?? {};
+  if (typeof input !== "string" || !input.trim()) return res.status(400).json({ error: "Escribe un canal de YouTube o una idea." });
+  if (typeof template !== "string" || !template.trim()) return res.status(400).json({ error: "El prompt de análisis está vacío." });
+  const apiKey = openRouterKey(res);
+  if (!apiKey) return;
+  const textModel = cleanModel(model) || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+
+  // Con clave de YouTube y un canal reconocible se usan datos exactos; si no, el modelo busca en la web.
+  let channelText: string | undefined;
+  let channelName: string | undefined;
+  let warning = "";
+  const ref = parseChannelRef(input);
+  const youtubeKey = process.env.YOUTUBE_API_KEY;
+  if (ref && youtubeKey) {
+    try {
+      const data = await fetchChannelData(ref, youtubeKey);
+      channelText = channelDataToText(data);
+      channelName = data.nombre;
+    } catch (error: any) {
+      warning = `${error.message} Se usará la búsqueda web.`;
+    }
+  } else if (ref) {
+    warning = "Sin YOUTUBE_API_KEY: los datos del canal se buscan en la web.";
+  }
+  const source = channelText ? "youtube" : "web";
+  res.set({
+    "X-Research-Source": source,
+    "X-Research-Channel": encodeURIComponent(channelName ?? ""),
+    "X-Research-Warning": encodeURIComponent(warning),
+  });
+
+  const prompt = buildAnalysisPrompt(template.slice(0, 10000), input.slice(0, 500), channelText);
+  await streamWithResult(
+    req,
+    res,
+    (signal) =>
+      streamChat(
+        { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined, signal },
+        { model: textModel, prompt, webSearch: source === "web", maxTokens: 6000, temperature: 0.7 }
+      ),
+    async (full) => {
+      const research = await saveResearch({
+        input: input.trim(),
+        source,
+        channelName,
+        analysis: analysisBody(full),
+        niches: parseNiches(full),
+        model: textModel,
+      });
+      return { research };
+    }
+  );
+});
+
+app.get("/api/research", async (_req, res) => {
+  try {
+    res.json(await listResearch());
+  } catch (error) {
+    sendError(res, error, "Error al listar los análisis.");
+  }
+});
+
+app.get("/api/research/:id", async (req, res) => {
+  try {
+    res.json(await getResearch(req.params.id));
+  } catch (error) {
+    sendError(res, error, "Error al leer el análisis.");
+  }
+});
+
+app.delete("/api/research/:id", async (req, res) => {
+  try {
+    await deleteResearch(req.params.id);
+    res.status(204).end();
+  } catch (error) {
+    sendError(res, error, "Error al eliminar el análisis.");
+  }
+});
+
+app.post("/api/research/:id/process", async (req, res) => {
+  let run;
+  try {
+    run = await getResearch(req.params.id);
+  } catch (error) {
+    return sendError(res, error, "Error al leer el análisis.");
+  }
+  const { nicheIndex, niche, model } = req.body ?? {};
+  const chosen: Niche | undefined =
+    niche && typeof niche.nombre === "string" && niche.nombre.trim()
+      ? { nombre: niche.nombre.trim().slice(0, 300), porQue: String(niche.porQue ?? "").slice(0, 1000) }
+      : run.niches[Number(nicheIndex)];
+  if (!chosen) return res.status(400).json({ error: "Elige un nicho." });
+  const apiKey = openRouterKey(res);
+  if (!apiKey) return;
+  const textModel = cleanModel(model) || run.model || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+  const origin = run.channelName || run.input;
+
+  await streamWithResult(
+    req,
+    res,
+    (signal) =>
+      streamChat(
+        { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined, signal },
+        { model: textModel, prompt: buildProcessPrompt(run.analysis, chosen, origin), maxTokens: 8000, temperature: 0.7 }
+      ),
+    async (full) => {
+      const format = await saveFormat(parseProcess(full, chosen, newFormatId(), origin));
+      await linkFormat(run.id, format.id);
+      return { format };
+    }
+  );
+});
+
+app.get("/api/formats", async (_req, res) => {
+  try {
+    res.json(await listFormats());
+  } catch (error) {
+    sendError(res, error, "Error al listar los formatos.");
+  }
+});
+
+app.get("/api/formats/:id", async (req, res) => {
+  try {
+    res.json(await getFormat(req.params.id));
+  } catch (error) {
+    sendError(res, error, "Error al leer el formato.");
+  }
+});
+
+app.patch("/api/formats/:id", async (req, res) => {
+  try {
+    res.json(await updateFormat(req.params.id, req.body ?? {}));
+  } catch (error) {
+    sendError(res, error, "Error al guardar el formato.");
+  }
+});
+
+app.delete("/api/formats/:id", async (req, res) => {
+  try {
+    await deleteFormat(req.params.id);
+    res.status(204).end();
+  } catch (error) {
+    sendError(res, error, "Error al eliminar el formato.");
+  }
+});
+
+app.get("/api/formats/:id/markdown", async (req, res) => {
+  try {
+    const format = await getFormat(req.params.id);
+    res.set({ "Content-Type": "text/markdown; charset=utf-8", "Content-Disposition": contentDisposition(`Proceso - ${safeFileName(format.nombre)}.md`) });
+    res.send(formatToMarkdown(format));
+  } catch (error) {
+    sendError(res, error, "Error al exportar el formato.");
+  }
+});
+
 app.post("/api/script-audio", async (req, res) => {
   try {
     const { script, voices, direction, model } = req.body;
@@ -197,7 +396,7 @@ app.get("/api/projects", async (_req, res) => {
 
 app.post("/api/projects", async (req, res) => {
   try {
-    const { name, source, direction, model } = req.body;
+    const { name, source, direction, model, formatId } = req.body;
     if (typeof source !== "string" || !source.trim()) return res.status(400).json({ error: "Pega el guion del proyecto." });
     if (source.length > MAX_SOURCE_CHARS) return res.status(400).json({ error: `El guion supera el máximo de ${MAX_SOURCE_CHARS} caracteres.` });
     const project = await createProject({
@@ -205,6 +404,7 @@ app.post("/api/projects", async (req, res) => {
       source,
       direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : "",
       model: cleanModel(model),
+      formatId: typeof formatId === "string" && /^[0-9a-z-]{8,64}$/.test(formatId) ? formatId : undefined,
     });
     res.status(201).json(viewOf(project));
   } catch (error: any) {
