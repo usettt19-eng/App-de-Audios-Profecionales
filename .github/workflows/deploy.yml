@@ -65,10 +65,11 @@ jobs:
           APP_USER: ${{ secrets.APP_USER }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
           APP_PORT: ${{ secrets.APP_PORT }}
+          APP_BIND: ${{ secrets.APP_BIND }}
         run: |
           umask 077
           : > audios-pro.env
-          for name in OPENROUTER_API_KEY OPENROUTER_TTS_MODEL GEMINI_API_KEY GEMINI_TTS_MODEL APP_USER APP_PASSWORD APP_PORT; do
+          for name in OPENROUTER_API_KEY OPENROUTER_TTS_MODEL GEMINI_API_KEY GEMINI_TTS_MODEL APP_USER APP_PASSWORD APP_PORT APP_BIND; do
             value="${!name}"
             if [ -n "$value" ]; then echo "${name}=${value}" >> audios-pro.env; fi
           done

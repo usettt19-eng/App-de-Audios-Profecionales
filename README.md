@@ -157,9 +157,10 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `OPENROUTER_API_KEY` | Clave de OpenRouter |
 | `APP_PASSWORD` | Contraseña de acceso a la app (usuario `admin`, o el de `APP_USER`) |
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
+| `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
 | `OPENROUTER_TTS_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
-Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y pon `APP_BIND=127.0.0.1` en `/opt/audios-pro/.env` para no exponerlo directamente.
+Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.
 
 Comandos útiles en el servidor:
 
