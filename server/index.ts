@@ -262,6 +262,11 @@ app.get("/api/projects/:id/zip", async (req, res) => {
   }
 });
 
+// Rutas de API inexistentes: 404 en JSON, en lugar de devolver la página de la app.
+app.use("/api", (_req, res) => {
+  res.status(404).json({ error: "Ruta no encontrada." });
+});
+
 async function start() {
   if (process.env.NODE_ENV !== "production") {
     const { createServer } = await import("vite");

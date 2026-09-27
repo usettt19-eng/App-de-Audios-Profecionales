@@ -135,19 +135,38 @@ El audio rápido admite guiones de hasta 20.000 caracteres y los proyectos hasta
 - `npm run lint`: verificación de tipos
 - `npm test`: tests del parser, del importador de guiones técnicos, del prompt de dirección, de los proyectos y del ensamblado de audio (sin llamar a la API)
 
-## Despliegue automático en un servidor
+## Despliegue automático en un servidor (Docker)
 
-Cada push a `main` se compila, se prueba y se instala en el servidor por SSH (`.github/workflows/deploy.yml` + `scripts/remote-deploy.sh`). La primera vez el script instala Node.js 22, crea el usuario `audios`, deja la app en `/opt/audios-pro` como servicio `audios-pro` (systemd) y guarda los proyectos en `/var/lib/audios-pro/projects`. Si la nueva versión no responde, vuelve a la anterior.
+La app corre como un contenedor Docker independiente (`audios-pro`), así que convive con otros servicios del servidor sin tocarlos: no instala Node.js en el sistema, no comparte redes ni volúmenes, y solo limpia sus propias imágenes.
+
+Cada push a `main` se prueba y se instala por SSH (`.github/workflows/deploy.yml` + `scripts/remote-deploy.sh`):
+
+1. Copia el código a `/opt/audios-pro/src` y construye la imagen con el `Dockerfile`.
+2. Arranca el contenedor con `docker compose` (`/opt/audios-pro/docker-compose.yml`), con reinicio automático.
+3. Comprueba `/api/health`; si la nueva versión no responde, vuelve a la anterior.
+
+Los proyectos y audios se guardan en `/opt/audios-pro/data` y la configuración en `/opt/audios-pro/.env`; ninguno se borra al actualizar. Antes de la primera instalación se comprueba que el puerto esté libre.
 
 Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables → Actions):
 
 | Secret | Valor |
 |---|---|
 | `SSH_HOST` | IP del servidor |
-| `SSH_USER` | Usuario SSH con permisos de root (por defecto `root`) |
+| `SSH_USER` | Usuario SSH con permisos para usar Docker (por defecto `root`) |
 | `SSH_PRIVATE_KEY` | Contenido completo de la clave privada (`.pem`) |
 | `OPENROUTER_API_KEY` | Clave de OpenRouter |
 | `APP_PASSWORD` | Contraseña de acceso a la app (usuario `admin`, o el de `APP_USER`) |
+| `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `OPENROUTER_TTS_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
-Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:3000` (abre ese puerto en el firewall o pon Nginx delante).
+Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y pon `APP_BIND=127.0.0.1` en `/opt/audios-pro/.env` para no exponerlo directamente.
+
+Comandos útiles en el servidor:
+
+```bash
+docker logs -f audios-pro                         # registro de la app
+cd /opt/audios-pro && docker compose restart      # reiniciar
+cd /opt/audios-pro && docker compose down         # detener
+```
+
+También se puede ejecutar a mano en cualquier máquina con Docker: `cp .env.example .env`, editarlo y `docker build -t audios-pro:current . && docker compose up -d`.

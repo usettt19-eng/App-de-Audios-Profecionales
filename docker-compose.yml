@@ -1,0 +1,22 @@
+# Servicio independiente: no comparte red ni volúmenes con otros contenedores del servidor.
+# APP_PORT (en .env) es el puerto del servidor donde se publica la app; por defecto 3000.
+name: audios-pro
+
+services:
+  app:
+    image: audios-pro:current
+    container_name: audios-pro
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+    ports:
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-3000}:3000"
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
