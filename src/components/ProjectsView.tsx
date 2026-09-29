@@ -1,12 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, CheckCircle2, Clock, Download, FileUp, FolderOpen, FolderPlus, Loader2, Music, Pencil, Play, RefreshCw, Sparkles, Square, Trash2, TriangleAlert,
+  ArrowLeft, CheckCircle2, ImageIcon, Clock, Download, FileUp, FolderOpen, FolderPlus, Loader2, Music, Pencil, Play, RefreshCw, Sparkles, Square, Trash2, TriangleAlert,
 } from "lucide-react";
 import { estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
 import { importTechnicalScript } from "../lib/technicalScript";
 import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
 import ScriptGenerator from "./ScriptGenerator";
+import ImageTile, { ProjectImage } from "./ImageTile";
 import { DOCUMENTARY_VOICE_DIRECTION } from "../lib/scriptTemplates";
 import { BUILTIN_FORMAT_ID, ProductionFormat } from "../lib/formats";
 import {
@@ -28,6 +29,7 @@ interface Section {
   durationSec?: number;
   generatedAt?: string;
   stale: boolean;
+  images?: ProjectImage[];
 }
 
 interface Project {
@@ -36,9 +38,20 @@ interface Project {
   direction: string;
   voices: Record<string, string>;
   model?: string;
+  imageModel?: string;
+  thumbnail?: ProjectImage;
   sections: Section[];
   updatedAt: string;
 }
+
+interface ImageModel {
+  id: string;
+  name: string;
+  recommended?: boolean;
+}
+
+type ImageTarget = { sectionId: string; n: number } | "thumbnail";
+const targetId = (t: ImageTarget) => (t === "thumbnail" ? "thumbnail" : `${t.sectionId}:${t.n}`);
 
 interface ProjectSummary {
   id: string;
@@ -339,7 +352,96 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
     }
   }, [speakers, project?.id, available]); // La voz sugerida solo se usa para personajes nuevos.
 
-  const applyServerSections = (p: Project) => setProject((prev) => (prev ? { ...prev, sections: p.sections } : p));
+  // Respuesta del servidor: bloques (audio e imágenes), miniatura y modelo de imagen son la fuente de verdad.
+  const applyServerSections = (p: Project) =>
+    setProject((prev) => (prev ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel } : p));
+
+  // --- Imágenes ---
+  const [imageModels, setImageModels] = useState<ImageModel[]>([]);
+  const [defaultImageModel, setDefaultImageModel] = useState("");
+  const [imagesRunning, setImagesRunning] = useState(false);
+  const stopImages = useRef(false);
+
+  useEffect(() => {
+    api<{ defaultModel: string; models: ImageModel[] }>("/api/image-models")
+      .then((data) => {
+        setImageModels(data.models);
+        setDefaultImageModel(data.defaultModel);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const markImages = (targets: ImageTarget[], patch: Partial<ProjectImage>) =>
+    setProject((prev) => {
+      if (!prev) return prev;
+      const ids = new Set(targets.map(targetId));
+      return {
+        ...prev,
+        thumbnail: prev.thumbnail && ids.has("thumbnail") ? { ...prev.thumbnail, ...patch } : prev.thumbnail,
+        sections: prev.sections.map((s) => ({ ...s, images: s.images?.map((img, n) => (ids.has(`${s.id}:${n}`) ? { ...img, ...patch } : img)) })),
+      };
+    });
+
+  const generateImages = async (body: { sectionId?: string; n?: number; thumbnail?: boolean }, optimistic: ImageTarget[]) => {
+    markImages(optimistic, { status: "generating", error: undefined });
+    try {
+      applyServerSections(await api<Project>(`/api/projects/${id}/images/generate`, { method: "POST", body: JSON.stringify(body) }));
+    } catch (e: any) {
+      if (e.data?.project) applyServerSections(e.data.project);
+      else markImages(optimistic, { status: "error", error: e.message });
+    }
+  };
+
+  const sectionPendingTargets = (s: Section): ImageTarget[] =>
+    (s.images ?? []).map((img, n) => (img.status === "done" ? null : { sectionId: s.id, n })).filter((t): t is { sectionId: string; n: number } => t !== null);
+
+  const generateAllImages = async () => {
+    if (!project) return;
+    stopImages.current = false;
+    setImagesRunning(true);
+    for (const s of project.sections) {
+      if (stopImages.current) break;
+      const targets = sectionPendingTargets(s);
+      if (targets.length) await generateImages({ sectionId: s.id }, targets);
+    }
+    if (!stopImages.current && project.thumbnail?.status !== "done") await generateImages({ thumbnail: true }, ["thumbnail"]);
+    setImagesRunning(false);
+  };
+
+  const uploadImage = async (target: ImageTarget, file: File) => {
+    try {
+      const res = await fetch(`/api/projects/${id}/images/upload?target=${encodeURIComponent(targetId(target))}`, {
+        method: "POST",
+        headers: { "Content-Type": file.type },
+        body: file,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "No se pudo subir la imagen.");
+      applyServerSections(data);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const saveImagePrompt = async (target: ImageTarget, prompt: string) => {
+    markImages([target], { prompt });
+    try {
+      applyServerSections(
+        await api<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ imagePrompts: [{ target: targetId(target), prompt }] }) })
+      );
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  const chooseImageModel = async (imageModel: string) => {
+    setProject((prev) => (prev ? { ...prev, imageModel } : prev));
+    try {
+      applyServerSections(await api<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify({ imageModel }) }));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
 
   const markSection = (sectionId: string, patch: Partial<Section>) =>
     setProject((prev) => (prev ? { ...prev, sections: prev.sections.map((s) => (s.id === sectionId ? { ...s, ...patch } : s)) } : prev));
@@ -397,6 +499,9 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   }
 
   const done = project.sections.filter((s) => s.status === "done").length;
+  const allImages = [...project.sections.flatMap((s) => s.images ?? []), ...(project.thumbnail ? [project.thumbnail] : [])];
+  const imagesDone = allImages.filter((img) => img.status === "done").length;
+  const imagesTotal = allImages.length;
   const pending = project.sections.filter((s) => s.status !== "done" || s.stale).length;
   const totalSeconds = project.sections.reduce((sum, s) => sum + (s.durationSec ?? 0), 0);
 
@@ -424,7 +529,7 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
               <Sparkles className="w-4 h-4" /> {pending ? `Generar ${pending} pendiente${pending > 1 ? "s" : ""}` : "Todo generado"}
             </button>
           )}
-          <a href={`/api/projects/${id}/zip`} className={`${chipButtonClass} py-2 ${done === 0 ? "pointer-events-none opacity-40" : ""}`}>
+          <a href={`/api/projects/${id}/zip`} className={`${chipButtonClass} py-2 ${done === 0 && imagesDone === 0 ? "pointer-events-none opacity-40" : ""}`}>
             <Download className="w-3.5 h-3.5" /> Descargar ZIP
           </a>
           <button onClick={removeProject} className={`${chipButtonClass} py-2 hover:text-rose-300`}>
@@ -447,11 +552,58 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
               busy={batchRunning}
               onGenerate={() => generateSection(section.id)}
               onSave={(patch) => saveSection(section.id, patch)}
+              imagesBusy={imagesRunning}
+              onGenerateImages={() => generateImages({ sectionId: section.id }, sectionPendingTargets(section))}
+              onGenerateImage={(n) => generateImages({ sectionId: section.id, n }, [{ sectionId: section.id, n }])}
+              onUploadImage={(n, file) => uploadImage({ sectionId: section.id, n }, file)}
+              onImagePrompt={(n, prompt) => saveImagePrompt({ sectionId: section.id, n }, prompt)}
             />
           ))}
         </div>
 
         <div className="lg:col-span-4 flex flex-col gap-4">
+          <div className={panelClass}>
+            <div className="flex items-center gap-2">
+              <ImageIcon className="w-4 h-4 text-fuchsia-400" />
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Imágenes</h3>
+              <span className="ml-auto text-[11px] text-slate-500">{imagesDone} de {imagesTotal}</span>
+            </div>
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Modelo</span>
+              <select
+                value={project.imageModel || defaultImageModel}
+                onChange={(e) => chooseImageModel(e.target.value)}
+                className="min-w-0 max-w-[65%] bg-slate-950 border border-slate-800 rounded-md px-2 py-1 text-xs text-slate-200 focus:outline-none focus:border-fuchsia-500/60"
+              >
+                {imageModels.length === 0 && <option value={project.imageModel || defaultImageModel}>{project.imageModel || defaultImageModel || "Cargando…"}</option>}
+                {imageModels.map((m) => (
+                  <option key={m.id} value={m.id}>{m.recommended ? "★ " : ""}{m.name}</option>
+                ))}
+              </select>
+            </label>
+            {imagesRunning ? (
+              <button onClick={() => (stopImages.current = true)} className={`${chipButtonClass} justify-center py-2`}>
+                <Square className="w-3.5 h-3.5" /> Detener tras el bloque actual
+              </button>
+            ) : (
+              <button onClick={generateAllImages} disabled={imagesDone === imagesTotal} className={primaryButtonClass}>
+                <Sparkles className="w-4 h-4" /> {imagesDone === imagesTotal ? "Imágenes listas" : `Generar ${imagesTotal - imagesDone} imágenes pendientes`}
+              </button>
+            )}
+            {project.thumbnail && (
+              <div className="flex flex-col gap-1">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Miniatura</span>
+                <ImageTile
+                  projectId={id}
+                  image={project.thumbnail}
+                  disabled={imagesRunning}
+                  onGenerate={() => generateImages({ thumbnail: true }, ["thumbnail"])}
+                  onUpload={(file) => uploadImage("thumbnail", file)}
+                  onPromptChange={(prompt) => saveImagePrompt("thumbnail", prompt)}
+                />
+              </div>
+            )}
+          </div>
           <div className="grid grid-cols-2 gap-2">
             <Stat icon={<CheckCircle2 className="w-3.5 h-3.5" />} label="Audios listos" value={`${done} de ${project.sections.length}`} />
             <Stat icon={<Clock className="w-3.5 h-3.5" />} label="Duración total" value={formatDuration(totalSeconds)} />
@@ -489,7 +641,7 @@ const STATUS_STYLES: Record<string, { label: string; className: string }> = {
 };
 
 function SectionCard({
-  index, projectId, section, speedPercent, busy, onGenerate, onSave,
+  index, projectId, section, speedPercent, busy, onGenerate, onSave, imagesBusy, onGenerateImages, onGenerateImage, onUploadImage, onImagePrompt,
 }: {
   index: number;
   projectId: string;
@@ -498,7 +650,14 @@ function SectionCard({
   busy: boolean;
   onGenerate: () => void;
   onSave: (patch: { title?: string; script?: string }) => Promise<void>;
+  imagesBusy: boolean;
+  onGenerateImages: () => void;
+  onGenerateImage: (n: number) => void;
+  onUploadImage: (n: number, file: File) => void;
+  onImagePrompt: (n: number, prompt: string) => void;
 }) {
+  const images = section.images ?? [];
+  const imagesPending = images.filter((img) => img.status !== "done" && img.status !== "generating").length;
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(section.title);
   const [draftScript, setDraftScript] = useState(section.script);
@@ -583,6 +742,32 @@ function SectionCard({
       {section.status === "error" && section.error && (
         <div className="flex gap-2 text-[11px] text-rose-300">
           <TriangleAlert className="w-4 h-4 shrink-0" /> {section.error}
+        </div>
+      )}
+
+      {images.length > 0 && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wide">Imágenes</span>
+            {imagesPending > 0 && (
+              <button onClick={onGenerateImages} disabled={imagesBusy} className={chipButtonClass}>
+                <Sparkles className="w-3 h-3" /> Generar {imagesPending}
+              </button>
+            )}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            {images.map((img, n) => (
+              <ImageTile
+                key={n}
+                projectId={projectId}
+                image={img}
+                disabled={imagesBusy}
+                onGenerate={() => onGenerateImage(n)}
+                onUpload={(file) => onUploadImage(n, file)}
+                onPromptChange={(prompt) => onImagePrompt(n, prompt)}
+              />
+            ))}
+          </div>
         </div>
       )}
 

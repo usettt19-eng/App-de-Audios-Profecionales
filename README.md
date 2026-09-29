@@ -25,6 +25,16 @@ La pestaña **Ideas** reproduce el primer paso del proceso: analizar un canal qu
 
 El proceso "Construcciones Imposibles" viene cargado como primer formato (*Documental construcciones*). Los análisis y formatos se guardan junto a los proyectos (`research/` y `formats/` al lado de `DATA_DIR`).
 
+## Imágenes por bloque (OpenRouter)
+
+Cada proyecto prepara las imágenes de cada bloque con las plantillas visuales de su formato (las 4 tomas: establishing, detalle, escala humana y archivo) y la miniatura del video:
+
+- `{elemento}` se reemplaza por el tema del bloque: la estructura de su título (p. ej. "El Viaducto de Millau"); en el gancho, su primera frase; en el cierre, el tema del video. La miniatura usa la última estructura antes del cierre (la más impactante en el formato countdown).
+- Los parámetros de Midjourney (`--ar 16:9 --style raw`) se quitan y la proporción 16:9 y la resolución 2K se envían aparte a la [API de imágenes de OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/image-generation) (`POST /api/v1/images`), con la misma clave `OPENROUTER_API_KEY`.
+- El modelo se elige por proyecto, con los recomendados primero (Seedream por defecto, o `OPENROUTER_IMAGE_MODEL`).
+- **Generar imágenes pendientes** recorre todos los bloques y la miniatura; cada imagen se puede regenerar, editar su prompt o reemplazar subiendo una propia (PNG, JPG o WebP).
+- El ZIP del proyecto incluye `imagenes/NN - Bloque - N Toma.png` y `miniatura.png`.
+
 ## Guiones generados con IA
 
 En **Nuevo proyecto → Generar guion con IA** escribes el título del documental (y, si quieres, indicaciones adicionales, duración y número de estructuras) y la app escribe el guion completo con un modelo de texto de OpenRouter, en vivo, usando el prompt del proceso documental:
@@ -155,6 +165,8 @@ API:
 - `POST /api/projects/:id/sections/:sectionId/generate`
 - `GET /api/projects/:id/sections/:sectionId/audio` (`?download=1` para descargar)
 - `GET /api/projects/:id/zip`
+- `GET /api/image-models`; `POST /api/projects/:id/images/generate` `{ sectionId, n? } | { thumbnail: true }`
+- `POST /api/projects/:id/images/upload?target=<sectionId>:<n>|thumbnail` (cuerpo: la imagen); `GET /api/projects/:id/images/:archivo`
 
 El audio rápido admite guiones de hasta 20.000 caracteres y los proyectos hasta 300.000. Modelo por defecto configurable con `OPENROUTER_TTS_MODEL`. Las solicitudes de voz se reintentan hasta 3 veces ante límites de cuota o errores temporales.
 
@@ -188,7 +200,7 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
 | `YOUTUBE_API_KEY` | Opcional: datos exactos de canales para el análisis de Ideas |
-| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
+| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `OPENROUTER_IMAGE_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
 Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.
 

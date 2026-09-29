@@ -6,9 +6,23 @@ import { promises as fs } from "fs";
 import path from "path";
 import type { ProductionCue } from "../src/lib/technicalScript";
 import { importTechnicalScript } from "../src/lib/technicalScript";
+import type { VisualVariation } from "../src/lib/formats";
+import { buildImagePrompts, fillTemplate, subjectForSection, thumbnailSubject } from "../src/lib/imagePrompts";
 import { createZip } from "./zip";
 
 export type SectionStatus = "pending" | "generating" | "done" | "error";
+
+// Imagen de un bloque (una por variación del formato) o miniatura del video.
+export interface ProjectImage {
+  variation: string;
+  prompt: string;
+  status: SectionStatus;
+  error?: string;
+  // Nombre del archivo en la carpeta del proyecto.
+  file?: string;
+  source?: "ai" | "upload";
+  generatedAt?: string;
+}
 
 export interface ProjectSection {
   id: string;
@@ -21,6 +35,7 @@ export interface ProjectSection {
   // Huella del guion, dirección y voces con que se generó el audio, para detectar audios desactualizados.
   renderedFrom?: string;
   generatedAt?: string;
+  images?: ProjectImage[];
 }
 
 export interface Project {
@@ -32,6 +47,9 @@ export interface Project {
   model?: string;
   // Formato de producción con que se escribió el guion (para imágenes y miniatura).
   formatId?: string;
+  // Modelo de imagen de OpenRouter; vacío = el predeterminado del servidor.
+  imageModel?: string;
+  thumbnail?: ProjectImage;
   sections: ProjectSection[];
   createdAt: string;
   updatedAt: string;
@@ -66,9 +84,19 @@ export function renderFingerprint(project: Pick<Project, "direction" | "voices" 
 
 // isActive indica qué secciones se están generando de verdad en este proceso: si el servidor se reinició
 // a mitad de una generación, esa sección se muestra como interrumpida en lugar de quedarse "generando".
-export function toView(project: Project, isActive: (sectionId: string) => boolean = () => false): ProjectView {
+// isActive indica qué secciones se están generando de verdad en este proceso: si el servidor se reinició
+// a mitad de una generación, esa sección se muestra como interrumpida en lugar de quedarse "generando".
+// isImageActive hace lo mismo con las imágenes (clave "<sectionId>:<n>" o "thumbnail").
+export function toView(
+  project: Project,
+  isActive: (sectionId: string) => boolean = () => false,
+  isImageActive: (key: string) => boolean = () => false
+): ProjectView {
+  const imageView = (img: ProjectImage, key: string): ProjectImage =>
+    img.status === "generating" && !isImageActive(key) ? { ...img, status: "error", error: "La generación se interrumpió. Vuelve a intentarlo." } : img;
   return {
     ...project,
+    thumbnail: project.thumbnail && imageView(project.thumbnail, "thumbnail"),
     sections: project.sections.map((s) => {
       const interrupted = s.status === "generating" && !isActive(s.id);
       return {
@@ -76,6 +104,7 @@ export function toView(project: Project, isActive: (sectionId: string) => boolea
         status: interrupted ? "error" : s.status,
         error: interrupted ? "La generación se interrumpió. Vuelve a intentarlo." : s.error,
         stale: s.status === "done" && s.renderedFrom !== renderFingerprint(project, s),
+        images: s.images?.map((img, n) => imageView(img, `${s.id}:${n}`)),
       };
     }),
   };
@@ -188,6 +217,58 @@ export function updateSection(id: string, sectionId: string, fn: (section: Proje
   });
 }
 
+export function mutateProject(id: string, fn: (project: Project) => void): Promise<Project> {
+  return withLock(id, async () => {
+    const project = await readProject(id);
+    fn(project);
+    project.updatedAt = new Date().toISOString();
+    await writeProject(project);
+    return project;
+  });
+}
+
+// Rellena los prompts de imagen que falten (bloques nuevos y miniatura) a partir de las plantillas del formato.
+export function ensureImagePrompts(project: Project, visuals: { variaciones: VisualVariation[]; miniatura: string }): boolean {
+  let changed = false;
+  for (const section of project.sections) {
+    if (section.images?.length) continue;
+    const subject = subjectForSection(section.title, section.script, project.name);
+    section.images = buildImagePrompts(visuals.variaciones, subject).map((p) => ({ ...p, status: "pending" }));
+    changed = true;
+  }
+  if (!project.thumbnail) {
+    project.thumbnail = { variation: "Miniatura", prompt: fillTemplate(visuals.miniatura, thumbnailSubject(project.sections, project.name)), status: "pending" };
+    changed = true;
+  }
+  return changed;
+}
+
+const IMAGE_FILE_RE = /^(thumbnail|[0-9a-f-]{36}-\d+)\.(png|jpg|webp)$/;
+export const IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", webp: "image/webp" };
+
+export function imageFileName(key: { sectionId: string; n: number } | "thumbnail", ext: string): string {
+  return `${key === "thumbnail" ? "thumbnail" : `${key.sectionId}-${key.n}`}.${ext}`;
+}
+
+export async function saveImageFile(projectId: string, name: string, data: Buffer, previous?: string): Promise<void> {
+  if (!IMAGE_FILE_RE.test(name)) throw new Error("Nombre de imagen no válido.");
+  const file = path.join(projectDir(projectId), name);
+  await fs.writeFile(`${file}.tmp`, data);
+  await fs.rename(`${file}.tmp`, file);
+  // Si cambió el formato (p. ej. de png a jpg), se borra el archivo anterior.
+  if (previous && previous !== name && IMAGE_FILE_RE.test(previous)) await fs.rm(path.join(projectDir(projectId), previous), { force: true });
+}
+
+export async function readImageFile(projectId: string, name: string): Promise<Buffer> {
+  if (!IMAGE_FILE_RE.test(name)) throw new NotFoundError("Imagen no encontrada.");
+  try {
+    return await fs.readFile(path.join(projectDir(projectId), name));
+  } catch (err: any) {
+    if (err.code === "ENOENT") throw new NotFoundError("Imagen no encontrada.");
+    throw err;
+  }
+}
+
 export async function saveSectionAudio(projectId: string, sectionId: string, wav: Buffer): Promise<void> {
   const file = audioPath(projectId, sectionId);
   await fs.writeFile(`${file}.tmp`, wav);
@@ -221,7 +302,8 @@ function formatDuration(seconds = 0): string {
 export function productionSheet(project: Project): string {
   const lines = [`PROYECTO: ${project.name}`, `Generado: ${new Date().toLocaleString("es")}`, ""];
   project.sections.forEach((s, i) => {
-    lines.push(`${sectionFileName(i, s)}  [${s.status === "done" ? formatDuration(s.durationSec) : "sin audio"}]`);
+    const images = (s.images ?? []).filter((img) => img.status === "done").length;
+    lines.push(`${sectionFileName(i, s)}  [${s.status === "done" ? formatDuration(s.durationSec) : "sin audio"}]${images ? `  · ${images} imágenes` : ""}`);
     for (const cue of s.cues) lines.push(`   ${cue.kind}: ${cue.description}`);
     lines.push("");
   });
@@ -233,8 +315,17 @@ export function productionSheet(project: Project): string {
 export async function buildProjectZip(project: Project): Promise<Buffer> {
   const entries: { name: string; data: Buffer }[] = [{ name: "00 - Hoja de produccion.txt", data: Buffer.from(productionSheet(project), "utf8") }];
   for (const [i, section] of project.sections.entries()) {
-    if (section.status !== "done") continue;
-    entries.push({ name: sectionFileName(i, section), data: await readSectionAudio(project.id, section.id) });
+    if (section.status === "done") entries.push({ name: sectionFileName(i, section), data: await readSectionAudio(project.id, section.id) });
+    // Imágenes del bloque: "imagenes/02 - Viaducto de Millau - 1 Establishing shot.png"
+    for (const [n, img] of (section.images ?? []).entries()) {
+      if (img.status !== "done" || !img.file) continue;
+      const ext = img.file.split(".").pop();
+      const base = sectionFileName(i, section).replace(/\.wav$/, "");
+      entries.push({ name: `imagenes/${base} - ${n + 1} ${safeFileName(img.variation)}.${ext}`, data: await readImageFile(project.id, img.file) });
+    }
+  }
+  if (project.thumbnail?.status === "done" && project.thumbnail.file) {
+    entries.push({ name: `miniatura.${project.thumbnail.file.split(".").pop()}`, data: await readImageFile(project.id, project.thumbnail.file) });
   }
   return createZip(entries);
 }

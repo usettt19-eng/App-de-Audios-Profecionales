@@ -16,6 +16,7 @@ import {
 } from "./research";
 import { analysisBody, buildAnalysisPrompt, buildProcessPrompt, formatToMarkdown, Niche, parseNiches, parseProcess } from "../src/lib/formats";
 import { pcmDurationSeconds } from "./audio";
+import { defaultImageModel, FALLBACK_IMAGE_MODEL, generateImage, listImageModels } from "./imageEngine";
 import { MAX_DIRECTION_CHARS } from "../src/lib/voiceDirection";
 import {
   buildProjectZip,
@@ -33,7 +34,15 @@ import {
   updateProject,
   updateSection,
   readSectionAudio,
+  ensureImagePrompts,
+  IMAGE_TYPES,
+  imageFileName,
+  mutateProject,
+  ProjectImage,
+  readImageFile,
+  saveImageFile,
 } from "./projects";
+import { BUILTIN_FORMAT } from "../src/lib/formats";
 
 dotenv.config();
 
@@ -373,7 +382,21 @@ app.post("/api/script-audio", async (req, res) => {
 
 const activeJobs = new Set<string>();
 const jobKey = (projectId: string, sectionId: string) => `${projectId}:${sectionId}`;
-const viewOf = (project: Awaited<ReturnType<typeof getProject>>) => toView(project, (sid) => activeJobs.has(jobKey(project.id, sid)));
+const activeImageJobs = new Set<string>();
+const viewOf = (project: Awaited<ReturnType<typeof getProject>>) =>
+  toView(
+    project,
+    (sid) => activeJobs.has(jobKey(project.id, sid)),
+    (key) => activeImageJobs.has(`${project.id}:${key}`)
+  );
+
+// Crea los prompts de imagen que falten con las plantillas del formato del proyecto (o el formato base).
+async function withImagePrompts(project: Awaited<ReturnType<typeof getProject>>) {
+  const needs = !project.thumbnail || project.sections.some((s) => !s.images?.length);
+  if (!needs) return project;
+  const format = project.formatId ? await getFormat(project.formatId).catch(() => BUILTIN_FORMAT) : BUILTIN_FORMAT;
+  return mutateProject(project.id, (p) => void ensureImagePrompts(p, { variaciones: format.visuales.variaciones, miniatura: format.miniatura }));
+}
 
 function sendError(res: express.Response, error: any, fallback: string) {
   if (error instanceof NotFoundError) return res.status(404).json({ error: error.message });
@@ -406,7 +429,7 @@ app.post("/api/projects", async (req, res) => {
       model: cleanModel(model),
       formatId: typeof formatId === "string" && /^[0-9a-z-]{8,64}$/.test(formatId) ? formatId : undefined,
     });
-    res.status(201).json(viewOf(project));
+    res.status(201).json(viewOf(await withImagePrompts(project)));
   } catch (error: any) {
     res.status(400).json({ error: error.message || "No se pudo crear el proyecto." });
   }
@@ -414,7 +437,7 @@ app.post("/api/projects", async (req, res) => {
 
 app.get("/api/projects/:id", async (req, res) => {
   try {
-    res.json(viewOf(await getProject(req.params.id)));
+    res.json(viewOf(await withImagePrompts(await getProject(req.params.id))));
   } catch (error) {
     sendError(res, error, "Error al leer el proyecto.");
   }
@@ -422,7 +445,19 @@ app.get("/api/projects/:id", async (req, res) => {
 
 app.patch("/api/projects/:id", async (req, res) => {
   try {
-    const { name, direction, voices, sections, model } = req.body;
+    const { name, direction, voices, sections, model, imageModel, imagePrompts } = req.body;
+    // Cambios de prompts de imagen: [{ target: "thumbnail" | "<sectionId>:<n>", prompt }]
+    if (Array.isArray(imagePrompts) || typeof imageModel === "string") {
+      await mutateProject(req.params.id, (p) => {
+        if (typeof imageModel === "string" && imageModel.trim()) p.imageModel = imageModel.trim().slice(0, 200);
+        for (const change of Array.isArray(imagePrompts) ? imagePrompts : []) {
+          if (typeof change?.prompt !== "string" || typeof change?.target !== "string") continue;
+          const [sid, n] = change.target.split(":");
+          const img = change.target === "thumbnail" ? p.thumbnail : p.sections.find((s) => s.id === sid)?.images?.[Number(n)];
+          if (img) img.prompt = change.prompt.slice(0, 3000);
+        }
+      });
+    }
     const project = await updateProject(req.params.id, {
       name,
       direction: typeof direction === "string" ? direction.slice(0, MAX_DIRECTION_CHARS) : undefined,
@@ -485,6 +520,127 @@ app.post("/api/projects/:id/sections/:sectionId/generate", async (req, res) => {
   } catch (error) {
     activeJobs.delete(key);
     sendError(res, error, "Error al generar la sección.");
+  }
+});
+
+// --- Imágenes (API de imágenes de OpenRouter) ---
+
+app.get("/api/image-models", async (_req, res) => {
+  try {
+    const models = await listImageModels(fetch, process.env.OPENROUTER_BASE_URL || undefined);
+    res.json({ defaultModel: defaultImageModel(models), models });
+  } catch (error: any) {
+    const fallback = process.env.OPENROUTER_IMAGE_MODEL || FALLBACK_IMAGE_MODEL;
+    res.json({ defaultModel: fallback, models: [{ id: fallback, name: fallback, recommended: true }], warning: error.message });
+  }
+});
+
+type ImageTarget = { kind: "thumbnail" } | { kind: "section"; sectionId: string; n: number };
+
+function targetKey(t: ImageTarget): string {
+  return t.kind === "thumbnail" ? "thumbnail" : `${t.sectionId}:${t.n}`;
+}
+
+function findImage(project: Awaited<ReturnType<typeof getProject>>, t: ImageTarget): ProjectImage | undefined {
+  if (t.kind === "thumbnail") return project.thumbnail;
+  return project.sections.find((s) => s.id === t.sectionId)?.images?.[t.n];
+}
+
+// Aplica un cambio a una imagen dentro de la escritura serializada del proyecto.
+function updateImage(projectId: string, t: ImageTarget, fn: (img: ProjectImage) => void) {
+  return mutateProject(projectId, (p) => {
+    const img = findImage(p, t);
+    if (img) fn(img);
+  });
+}
+
+async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) await fn(items[next++]);
+  }));
+}
+
+// Genera imágenes: una concreta (sectionId + n), las pendientes de un bloque (sectionId) o la miniatura.
+app.post("/api/projects/:id/images/generate", async (req, res) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+  try {
+    const project = await withImagePrompts(await getProject(req.params.id));
+    const { sectionId, n, thumbnail } = req.body ?? {};
+    let targets: ImageTarget[] = [];
+    if (thumbnail) targets = [{ kind: "thumbnail" }];
+    else {
+      const section = project.sections.find((s) => s.id === sectionId);
+      if (!section) return res.status(404).json({ error: "Sección no encontrada." });
+      const indices = Number.isInteger(n) ? [n] : (section.images ?? []).map((img, i) => (img.status === "done" ? -1 : i)).filter((i) => i >= 0);
+      targets = indices.filter((i) => section.images?.[i]).map((i) => ({ kind: "section", sectionId: section.id, n: i }));
+    }
+    targets = targets.filter((t) => !activeImageJobs.has(`${project.id}:${targetKey(t)}`));
+    if (!targets.length) return res.json(viewOf(project));
+
+    const model = project.imageModel || process.env.OPENROUTER_IMAGE_MODEL || FALLBACK_IMAGE_MODEL;
+    for (const t of targets) activeImageJobs.add(`${project.id}:${targetKey(t)}`);
+    await mutateProject(project.id, (p) => {
+      for (const t of targets) {
+        const img = findImage(p, t);
+        if (img) Object.assign(img, { status: "generating", error: undefined });
+      }
+    });
+
+    let lastError = "";
+    await mapLimit(targets, 2, async (t) => {
+      const key = `${project.id}:${targetKey(t)}`;
+      const prompt = findImage(project, t)?.prompt ?? "";
+      try {
+        const image = await generateImage({ apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined }, { model, prompt, aspectRatio: "16:9", resolution: "2K" });
+        const previous = findImage(await getProject(project.id), t)?.file;
+        const name = imageFileName(t.kind === "thumbnail" ? "thumbnail" : { sectionId: t.sectionId, n: t.n }, image.ext);
+        await saveImageFile(project.id, name, image.data, previous);
+        await updateImage(project.id, t, (img) => Object.assign(img, { status: "done", file: name, source: "ai", generatedAt: new Date().toISOString(), error: undefined }));
+      } catch (error: any) {
+        lastError = error?.message || "Error al generar la imagen.";
+        console.error("Image Error:", error);
+        await updateImage(project.id, t, (img) => Object.assign(img, { status: "error", error: lastError }));
+      } finally {
+        activeImageJobs.delete(key);
+      }
+    });
+    const updated = viewOf(await getProject(project.id));
+    if (lastError && targets.length === 1) return res.status(502).json({ error: lastError, project: updated });
+    res.json(updated);
+  } catch (error) {
+    sendError(res, error, "Error al generar las imágenes.");
+  }
+});
+
+// Sube una imagen propia en lugar de la generada (cuerpo binario, Content-Type image/*).
+app.post("/api/projects/:id/images/upload", express.raw({ type: "image/*", limit: "25mb" }), async (req, res) => {
+  try {
+    const ext = ({ "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } as Record<string, string>)[req.headers["content-type"] ?? ""];
+    if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "Sube una imagen PNG, JPG o WebP." });
+    const target = String(req.query.target ?? "");
+    const [sectionId, nText] = target.split(":");
+    const t: ImageTarget = target === "thumbnail" ? { kind: "thumbnail" } : { kind: "section", sectionId, n: Number(nText) };
+    const project = await withImagePrompts(await getProject(req.params.id));
+    const current = findImage(project, t);
+    if (!current) return res.status(404).json({ error: "Imagen no encontrada." });
+    const name = imageFileName(t.kind === "thumbnail" ? "thumbnail" : { sectionId: t.sectionId, n: t.n }, ext);
+    await saveImageFile(project.id, name, req.body, current.file);
+    const updated = await updateImage(project.id, t, (img) => Object.assign(img, { status: "done", file: name, source: "upload", generatedAt: new Date().toISOString(), error: undefined }));
+    res.json(viewOf(updated));
+  } catch (error) {
+    sendError(res, error, "Error al subir la imagen.");
+  }
+});
+
+app.get("/api/projects/:id/images/:file", async (req, res) => {
+  try {
+    const data = await readImageFile(req.params.id, req.params.file);
+    res.set({ "Content-Type": IMAGE_TYPES[req.params.file.split(".").pop() ?? ""] ?? "application/octet-stream", "Cache-Control": "private, max-age=3600" });
+    res.send(data);
+  } catch (error) {
+    sendError(res, error, "Error al leer la imagen.");
   }
 });
 
