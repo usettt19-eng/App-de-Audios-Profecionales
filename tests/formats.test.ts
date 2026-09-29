@@ -83,6 +83,9 @@ test("exporta el formato con las 6 secciones del documento de proceso", () => {
 
 test("guarda formatos, crea el formato base y los edita", async () => {
   const list = await research.listFormats();
+  // Deben quedar dentro de DATA_DIR (el volumen de Docker): fuera de él el contenedor no tiene permisos.
+  const { existsSync } = await import("fs");
+  assert.ok(existsSync(path.join(process.env.DATA_DIR!, "_formats", `${BUILTIN_FORMAT.id}.json`)));
   assert.deepEqual(list.map((f) => f.id), [BUILTIN_FORMAT.id]);
   const edited = await research.updateFormat(BUILTIN_FORMAT.id, { duracion: "30-35", id: "hack" } as any);
   assert.equal(edited.duracion, "30-35");

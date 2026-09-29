@@ -96,8 +96,17 @@ export default function IdeasView({ onUseFormat }: { onUseFormat: (formatId: str
   const abortRef = useRef<AbortController | null>(null);
 
   const refresh = () => {
-    fetch("/api/research").then((r) => r.json()).then(setHistory).catch(() => undefined);
-    fetch("/api/formats").then((r) => r.json()).then(setFormats).catch(() => undefined);
+    fetch("/api/research")
+      .then((r) => r.json())
+      .then((data) => Array.isArray(data) && setHistory(data))
+      .catch(() => undefined);
+    fetch("/api/formats")
+      .then(async (r) => {
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || `Error ${r.status}`);
+        setFormats(data);
+      })
+      .catch((e) => setError(`No se pudieron cargar los formatos: ${e.message}`));
   };
 
   useEffect(() => {

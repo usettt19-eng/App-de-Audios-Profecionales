@@ -1,4 +1,4 @@
-// Almacenamiento de análisis de canales y formatos de producción (<DATA_DIR>/../research y ../formats).
+// Almacenamiento de análisis de canales y formatos de producción (<DATA_DIR>/_research y <DATA_DIR>/_formats).
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
@@ -21,8 +21,9 @@ export interface ResearchRun {
 const ID_RE = /^[0-9a-z-]{8,64}$/;
 
 function root(kind: "research" | "formats"): string {
-  // Junto a la carpeta de proyectos, para que el mismo volumen de Docker lo guarde todo.
-  return path.join(path.dirname(path.resolve(process.env.DATA_DIR || "data/projects")), kind);
+  // Dentro de la carpeta de datos (el volumen de Docker), en subcarpetas que no se confunden con proyectos:
+  // la lista de proyectos solo lee carpetas con id UUID. Fuera de ella el contenedor no tiene permisos.
+  return path.join(path.resolve(process.env.DATA_DIR || "data/projects"), `_${kind}`);
 }
 
 function file(kind: "research" | "formats", id: string): string {

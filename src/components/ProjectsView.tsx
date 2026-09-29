@@ -9,7 +9,7 @@ import { ErrorNote } from "./AudioScriptStudio";
 import ScriptGenerator from "./ScriptGenerator";
 import ImageTile, { ProjectImage } from "./ImageTile";
 import { DOCUMENTARY_VOICE_DIRECTION } from "../lib/scriptTemplates";
-import { BUILTIN_FORMAT_ID, ProductionFormat } from "../lib/formats";
+import { BUILTIN_FORMAT, BUILTIN_FORMAT_ID, ProductionFormat } from "../lib/formats";
 import {
   chipButtonClass, DirectionPanel, formatDuration, ModelPicker, panelClass, Stat, useTtsCatalog, VoiceCast, voicesForModel, withDefaultVoices,
 } from "./voiceControls";
@@ -131,7 +131,13 @@ function NewProject({ initialFormatId, onCancel, onCreated }: { initialFormatId?
   const format = formats.find((f) => f.id === formatId);
 
   useEffect(() => {
-    api<ProductionFormat[]>("/api/formats").then(setFormats).catch(() => undefined);
+    api<ProductionFormat[]>("/api/formats")
+      .then(setFormats)
+      .catch((e) => {
+        // Sin la lista del servidor se puede seguir con el formato base incluido en la app.
+        setFormats([BUILTIN_FORMAT]);
+        setError(`No se pudieron cargar los formatos guardados (${e.message}). Se usa el formato base.`);
+      });
   }, []);
   const [name, setName] = useState("");
   const [source, setSource] = useState("");
