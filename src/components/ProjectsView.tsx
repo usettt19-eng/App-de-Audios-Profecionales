@@ -39,6 +39,7 @@ interface Project {
   voices: Record<string, string>;
   model?: string;
   imageModel?: string;
+  imagePlan?: "template" | "ai";
   thumbnail?: ProjectImage;
   sections: Section[];
   updatedAt: string;
@@ -360,13 +361,35 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
   // Respuesta del servidor: bloques (audio e imágenes), miniatura y modelo de imagen son la fuente de verdad.
   const applyServerSections = (p: Project) =>
-    setProject((prev) => (prev ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel } : p));
+    setProject((prev) => (prev ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel, imagePlan: p.imagePlan } : p));
 
   // --- Imágenes ---
   const [imageModels, setImageModels] = useState<ImageModel[]>([]);
   const [defaultImageModel, setDefaultImageModel] = useState("");
   const [imagesRunning, setImagesRunning] = useState(false);
+  const [planning, setPlanning] = useState(false);
   const stopImages = useRef(false);
+  const projectRef = useRef<Project | null>(null);
+  projectRef.current = project;
+
+  // El director de arte escribe los prompts de cada bloque a partir de su narración. Se hace una vez
+  // antes de generar (o a mano con "Rehacer prompts con IA"). Devuelve el proyecto actualizado.
+  const planImages = async (force: boolean): Promise<Project | null> => {
+    setPlanning(true);
+    try {
+      const p = await api<Project>(`/api/projects/${id}/images/plan`, { method: "POST", body: JSON.stringify({ force }) });
+      applyServerSections(p);
+      return p;
+    } catch (e: any) {
+      setError(`No se pudieron preparar los prompts de imagen: ${e.message}`);
+      return null;
+    } finally {
+      setPlanning(false);
+    }
+  };
+
+  const ensurePlan = async (): Promise<Project | null> =>
+    projectRef.current?.imagePlan === "ai" ? projectRef.current : planImages(false);
 
   useEffect(() => {
     api<{ defaultModel: string; models: ImageModel[] }>("/api/image-models")
@@ -402,16 +425,29 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
     (s.images ?? []).map((img, n) => (img.status === "done" ? null : { sectionId: s.id, n })).filter((t): t is { sectionId: string; n: number } => t !== null);
 
   const generateAllImages = async () => {
-    if (!project) return;
     stopImages.current = false;
     setImagesRunning(true);
-    for (const s of project.sections) {
-      if (stopImages.current) break;
-      const targets = sectionPendingTargets(s);
-      if (targets.length) await generateImages({ sectionId: s.id }, targets);
+    const planned = await ensurePlan();
+    if (planned) {
+      for (const s of planned.sections) {
+        if (stopImages.current) break;
+        const targets = sectionPendingTargets(s);
+        if (targets.length) await generateImages({ sectionId: s.id }, targets);
+      }
+      if (!stopImages.current && planned.thumbnail?.status !== "done") await generateImages({ thumbnail: true }, ["thumbnail"]);
     }
-    if (!stopImages.current && project.thumbnail?.status !== "done") await generateImages({ thumbnail: true }, ["thumbnail"]);
     setImagesRunning(false);
+  };
+
+  const replanImages = async () => {
+    if (!window.confirm("La IA reescribirá los prompts de todas las imágenes a partir de lo que narra cada bloque. Las imágenes generadas quedarán pendientes de regenerar (las subidas a mano se conservan). ¿Continuar?")) return;
+    await planImages(true);
+  };
+
+  // Generar desde un bloque o una imagen suelta también pasa antes por el director de arte.
+  const generateWithPlan = async (body: { sectionId?: string; n?: number; thumbnail?: boolean }, optimistic: (p: Project) => ImageTarget[]) => {
+    const planned = await ensurePlan();
+    if (planned) await generateImages(body, optimistic(planned));
   };
 
   const uploadImage = async (target: ImageTarget, file: File) => {
@@ -558,9 +594,11 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
               busy={batchRunning}
               onGenerate={() => generateSection(section.id)}
               onSave={(patch) => saveSection(section.id, patch)}
-              imagesBusy={imagesRunning}
-              onGenerateImages={() => generateImages({ sectionId: section.id }, sectionPendingTargets(section))}
-              onGenerateImage={(n) => generateImages({ sectionId: section.id, n }, [{ sectionId: section.id, n }])}
+              imagesBusy={imagesRunning || planning}
+              onGenerateImages={() =>
+                generateWithPlan({ sectionId: section.id }, (p) => sectionPendingTargets(p.sections.find((x) => x.id === section.id) ?? section))
+              }
+              onGenerateImage={(n) => generateWithPlan({ sectionId: section.id, n }, () => [{ sectionId: section.id, n }])}
               onUploadImage={(n, file) => uploadImage({ sectionId: section.id, n }, file)}
               onImagePrompt={(n, prompt) => saveImagePrompt({ sectionId: section.id, n }, prompt)}
             />
@@ -587,7 +625,11 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 ))}
               </select>
             </label>
-            {imagesRunning ? (
+            {planning ? (
+              <p className="flex items-center justify-center gap-2 text-[11px] text-slate-400 py-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" /> La IA está escribiendo los prompts a partir de la narración…
+              </p>
+            ) : imagesRunning ? (
               <button onClick={() => (stopImages.current = true)} className={`${chipButtonClass} justify-center py-2`}>
                 <Square className="w-3.5 h-3.5" /> Detener tras el bloque actual
               </button>
@@ -596,6 +638,14 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
                 <Sparkles className="w-4 h-4" /> {imagesDone === imagesTotal ? "Imágenes listas" : `Generar ${imagesTotal - imagesDone} imágenes pendientes`}
               </button>
             )}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10px] text-slate-500">
+                {project.imagePlan === "ai" ? "Prompts escritos por la IA según la narración." : "Los prompts se ajustarán con IA a la narración al generar."}
+              </span>
+              <button onClick={replanImages} disabled={planning || imagesRunning} className={chipButtonClass} title="Reescribir los prompts de todas las imágenes según la narración">
+                <RefreshCw className="w-3 h-3" /> Rehacer prompts con IA
+              </button>
+            </div>
             {project.thumbnail && (
               <div className="flex flex-col gap-1">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Miniatura</span>
@@ -603,7 +653,7 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
                   projectId={id}
                   image={project.thumbnail}
                   disabled={imagesRunning}
-                  onGenerate={() => generateImages({ thumbnail: true }, ["thumbnail"])}
+                  onGenerate={() => generateWithPlan({ thumbnail: true }, () => ["thumbnail"])}
                   onUpload={(file) => uploadImage("thumbnail", file)}
                   onPromptChange={(prompt) => saveImagePrompt("thumbnail", prompt)}
                 />

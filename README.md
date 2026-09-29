@@ -29,7 +29,8 @@ El proceso "Construcciones Imposibles" viene cargado como primer formato (*Docum
 
 Cada proyecto prepara las imágenes de cada bloque con las plantillas visuales de su formato (las 4 tomas: establishing, detalle, escala humana y archivo) y la miniatura del video:
 
-- `{elemento}` se reemplaza por el tema del bloque: la estructura de su título (p. ej. "El Viaducto de Millau"); en el gancho, su primera frase; en el cierre, el tema del video. La miniatura usa la última estructura antes del cierre (la más impactante en el formato countdown).
+- **Director de arte con IA:** antes de generar, un modelo de texto lee la narración de cada bloque y escribe los prompts de sus imágenes con el lugar u objeto concreto y su ubicación real (p. ej. "Angel Falls, Canaima National Park, Venezuela"), usando las plantillas del formato solo como guía de estilo y adaptándolas al tema (sin términos de arquitectura en un paraje natural). **Rehacer prompts con IA** los reescribe todos y deja pendientes de regenerar las imágenes ya hechas (las subidas a mano se conservan).
+- Sin director (prompts iniciales), `{elemento}` se reemplaza por el tema del bloque: la estructura de su título; en el gancho, su primera frase; en el cierre, el tema del video. La miniatura usa la última estructura antes del cierre.
 - Los parámetros de Midjourney (`--ar 16:9 --style raw`) se quitan y la proporción 16:9 y la resolución 2K se envían aparte a la [API de imágenes de OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/image-generation) (`POST /api/v1/images`), con la misma clave `OPENROUTER_API_KEY`.
 - El modelo se elige por proyecto, con los recomendados primero (Seedream por defecto, o `OPENROUTER_IMAGE_MODEL`).
 - **Generar imágenes pendientes** recorre todos los bloques y la miniatura; cada imagen se puede regenerar, editar su prompt o reemplazar subiendo una propia (PNG, JPG o WebP).
@@ -43,6 +44,7 @@ En **Nuevo proyecto → Generar guion con IA** escribes el título del documenta
 - Al final se añaden siempre unas reglas de formato fijas (`src/lib/scriptTemplates.ts`) para que el modelo marque cada bloque como `[BLOQUE N — NOMBRE]` con su música, tono y pausas, y la app pueda dividirlo en audios.
 - El modelo se elige de la lista de OpenRouter, con los recomendados primero y el costo aproximado por guion. Por defecto, el primero disponible entre Claude Sonnet/Opus, GPT-5 y Gemini 3 (o `OPENROUTER_TEXT_MODEL`).
 - Al generar, el nombre del proyecto sale del título y la dirección de voz se completa con la del proceso documental (voz grave de documental, 90-95 % de velocidad, pausas tras cifras y el prompt de estilo).
+- Se añaden siempre reglas de **fidelidad al tema**: todo debe pertenecer a lo que dice el título (si nombra un país, todos los lugares deben estar allí), adaptando los ejemplos del formato en vez de cambiar de tema, y sin inventar datos.
 - El guion se puede corregir antes de crear el proyecto.
 - El prompt, el título, la duración y los segmentos vienen del **formato** elegido (ver Ideas); los cambios en el generador valen solo para esa generación.
 
@@ -165,6 +167,7 @@ API:
 - `POST /api/projects/:id/sections/:sectionId/generate`
 - `GET /api/projects/:id/sections/:sectionId/audio` (`?download=1` para descargar)
 - `GET /api/projects/:id/zip`
+- `POST /api/projects/:id/images/plan` `{ force? }` → prompts de imagen escritos por el director de arte
 - `GET /api/image-models`; `POST /api/projects/:id/images/generate` `{ sectionId, n? } | { thumbnail: true }`
 - `POST /api/projects/:id/images/upload?target=<sectionId>:<n>|thumbnail` (cuerpo: la imagen); `GET /api/projects/:id/images/:archivo`
 

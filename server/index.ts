@@ -43,6 +43,7 @@ import {
   saveImageFile,
 } from "./projects";
 import { BUILTIN_FORMAT } from "../src/lib/formats";
+import { buildDirectionPrompt, narrationOf, parseDirection } from "../src/lib/imageDirection";
 
 dotenv.config();
 
@@ -560,6 +561,57 @@ async function mapLimit<T>(items: T[], limit: number, fn: (item: T) => Promise<v
     while (next < items.length) await fn(items[next++]);
   }));
 }
+
+// Director de arte: un modelo de texto escribe los prompts de imagen de cada bloque a partir de su narración.
+// Con force, rehace también los de imágenes ya generadas (salvo las subidas a mano) y las deja pendientes.
+app.post("/api/projects/:id/images/plan", async (req, res) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+  try {
+    const project = await withImagePrompts(await getProject(req.params.id));
+    const force = !!req.body?.force;
+    const format = project.formatId ? await getFormat(project.formatId).catch(() => BUILTIN_FORMAT) : BUILTIN_FORMAT;
+    const variations = format.visuales.variaciones;
+    // Ids cortos (b1, b2…) para que el modelo no tenga que copiar identificadores largos.
+    const blocks = project.sections.map((s, i) => ({ id: `b${i + 1}`, title: s.title, narration: narrationOf(s.script) }));
+    const prompt = buildDirectionPrompt({
+      videoTitle: project.name,
+      blocks,
+      variations,
+      baseTemplate: format.visuales.plantillaBase,
+      thumbnailTemplate: format.miniatura,
+    });
+    const models = await listTextModels(fetch, process.env.OPENROUTER_BASE_URL || undefined).catch(() => []);
+    const textModel = defaultTextModel(models);
+    let raw = "";
+    const chunks = await streamChat(
+      { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined },
+      { model: textModel, prompt, maxTokens: 12000, temperature: 0.4 }
+    );
+    for await (const text of chunks) raw += text;
+    const directed = parseDirection(raw, variations.length);
+
+    const updated = await mutateProject(project.id, (p) => {
+      p.sections.forEach((section, i) => {
+        const plan = directed.blocks[`b${i + 1}`];
+        if (!plan) return;
+        section.images = (section.images ?? []).map((img, n) => {
+          const next = plan.prompts[n];
+          if (!next || img.source === "upload") return img;
+          if (img.status === "done" && !force) return img;
+          return { ...img, prompt: next, status: img.status === "generating" ? img.status : "pending", error: undefined };
+        });
+      });
+      if (directed.thumbnail && p.thumbnail && p.thumbnail.source !== "upload" && (force || p.thumbnail.status !== "done")) {
+        Object.assign(p.thumbnail, { prompt: directed.thumbnail, status: "pending", error: undefined });
+      }
+      p.imagePlan = "ai";
+    });
+    res.json(viewOf(updated));
+  } catch (error) {
+    sendError(res, error, "Error al preparar los prompts de imagen.");
+  }
+});
 
 // Genera imágenes: una concreta (sectionId + n), las pendientes de un bloque (sectionId) o la miniatura.
 app.post("/api/projects/:id/images/generate", async (req, res) => {

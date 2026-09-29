@@ -49,6 +49,8 @@ export interface Project {
   formatId?: string;
   // Modelo de imagen de OpenRouter; vacío = el predeterminado del servidor.
   imageModel?: string;
+  // "ai": los prompts de imagen los escribió el director de arte a partir de la narración de cada bloque.
+  imagePlan?: "template" | "ai";
   thumbnail?: ProjectImage;
   sections: ProjectSection[];
   createdAt: string;

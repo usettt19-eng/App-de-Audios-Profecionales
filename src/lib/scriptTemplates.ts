@@ -78,5 +78,15 @@ export function buildScriptPrompt(template: string, vars: ScriptVariables): stri
     .replaceAll("{duracion}", vars.duracion.trim())
     .replaceAll("{palabras}", wordsForDuration(vars.duracion))
     .replaceAll("{segmentos}", vars.segmentos.trim());
-  return `${filled.trim()}\n\n${OUTPUT_FORMAT_RULES}`;
+  return `${filled.trim()}\n\n${topicRules(vars)}\n\n${OUTPUT_FORMAT_RULES}`;
+}
+
+// Se añade siempre: el formato puede venir de otro nicho (p. ej. construcciones) y el modelo no debe mezclar temas
+// ni inventar datos. El título y las indicaciones mandan sobre los ejemplos del prompt.
+export function topicRules(vars: Pick<ScriptVariables, "titulo" | "tema">): string {
+  return `FIDELIDAD AL TEMA Y A LOS DATOS (obligatorio, tiene prioridad sobre cualquier ejemplo anterior):
+- El tema del video es exactamente el del título: "${vars.titulo.trim()}"${vars.tema?.trim() ? ` y estas indicaciones: ${vars.tema.trim()}` : ""}.
+- Todos los segmentos deben pertenecer estrictamente a ese tema. Si el título menciona un país, región o ciudad, TODOS los lugares, obras o hechos deben estar realmente allí; no incluyas nada de otros lugares, aunque sea famoso.
+- Si los ejemplos o el micro-patrón del prompt hablan de otro tipo de contenido (p. ej. construcciones o ingeniería), adáptalos al tema del título en lugar de cambiar de tema.
+- Usa solo lugares, nombres, fechas y cifras reales y verificables. Si no estás seguro de un dato, omítelo o exprésalo de forma aproximada; nunca lo inventes.`;
 }
