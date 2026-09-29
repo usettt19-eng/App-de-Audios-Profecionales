@@ -3,7 +3,7 @@ import {
   ArrowLeft, CheckCircle2, ImageIcon, Clock, Download, FileUp, FolderOpen, FolderPlus, Loader2, Music, Pencil, Play, RefreshCw, Sparkles, Square, Trash2, TriangleAlert,
 } from "lucide-react";
 import { estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
-import { importTechnicalScript } from "../lib/technicalScript";
+import { countBlockMarkers, importTechnicalScript } from "../lib/technicalScript";
 import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
 import ScriptGenerator from "./ScriptGenerator";
@@ -172,6 +172,8 @@ function NewProject({ initialFormatId, onCancel, onCreated }: { initialFormatId?
   const model = chosenModel ?? catalog?.defaultModel ?? "";
 
   const preview = useMemo(() => (source.trim() ? importTechnicalScript(source) : []), [source]);
+  // Aviso si el texto tiene más marcas de bloque de las que se pudieron leer (p. ej. una marca mal escrita).
+  const markers = useMemo(() => countBlockMarkers(source), [source]);
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -277,6 +279,13 @@ function NewProject({ initialFormatId, onCancel, onCreated }: { initialFormatId?
         <div className={panelClass}>
           <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Audios detectados: {preview.length}</h3>
           {preview.length === 0 && <p className="text-[11px] text-slate-500">Pega un guion para ver cómo se dividirá.</p>}
+          {markers > preview.length && (
+            <p className="flex gap-1.5 text-[11px] text-amber-300 leading-relaxed">
+              <TriangleAlert className="w-3.5 h-3.5 shrink-0" />
+              El texto tiene {markers} marcas de bloque pero solo se reconocieron {preview.length}. Revisa que cada una esté en su propia línea, como
+              [BLOQUE N — NOMBRE].
+            </p>
+          )}
           <ol className="flex flex-col gap-1 max-h-72 overflow-y-auto">
             {preview.map((s, i) => (
               <li key={i} className="flex items-center justify-between gap-2 text-[11px]">

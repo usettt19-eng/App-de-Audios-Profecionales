@@ -40,11 +40,11 @@ Reglas de formato:
 // Se añade siempre al final del prompt: es el formato que la app sabe dividir en audios.
 export const OUTPUT_FORMAT_RULES = `FORMATO DE SALIDA (obligatorio: el texto lo procesa una aplicación que genera un audio por bloque):
 - Devuelve SOLO el guion, sin introducción, notas ni comentarios antes o después.
-- Empieza cada bloque con una línea propia con este formato exacto: [BLOQUE N — NOMBRE]
+- Empieza cada bloque con una línea propia con este formato exacto, cerrando siempre el corchete y sin asteriscos: [BLOQUE N — NOMBRE]
   · El bloque 1 es el gancho: [BLOQUE 1 — GANCHO]
   · Cada estructura va en su propio bloque y NOMBRE es el nombre de esa estructura (p. ej. [BLOQUE 2 — VIADUCTO DE MILLAU]).
   · El último bloque es el cierre: [BLOQUE N — CIERRE]
-- Dentro de cada bloque puedes añadir indicaciones de producción, cada una en su propia línea y entre paréntesis:
+- Dentro de cada bloque puedes añadir indicaciones de producción, cada una en su propia línea (nunca al final de un párrafo) y entre paréntesis:
   (MÚSICA: ambiente musical sugerido, al inicio del bloque)
   (SFX: efecto de sonido puntual)
   (Tono: tono de narración para los párrafos siguientes)

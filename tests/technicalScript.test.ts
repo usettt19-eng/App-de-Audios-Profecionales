@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "fs";
-import { importTechnicalScript, looksLikeTechnicalScript } from "../src/lib/technicalScript";
+import { countBlockMarkers, importTechnicalScript, looksLikeTechnicalScript } from "../src/lib/technicalScript";
 import { parseScript } from "../src/lib/scriptParser";
 
 const source = readFileSync(new URL("./fixtures/guion-tecnico.md", import.meta.url), "utf8");
@@ -48,4 +48,28 @@ test("sin marcas de bloque, todo el texto es un único audio", () => {
   const sections = importTechnicalScript("*(Tono: Sereno)*\nHola a todos.\n**(MÚSICA: suave)**\nAdiós.");
   assert.equal(sections.length, 1);
   assert.equal(sections[0].cues.length, 1);
+});
+
+test("reconoce marcas de bloque mal cerradas y las indicaciones dentro de un párrafo", () => {
+  const text = readFileSync(new URL("./fixtures/guion-marcas-rotas.md", import.meta.url), "utf8");
+  const sections = importTechnicalScript(text);
+  assert.equal(countBlockMarkers(text), 6);
+  assert.deepEqual(sections.map((s) => s.title), ["Gancho", "El Salto Ángel", "El Teleférico de Mérida", "La Sierra Nevada de Mérida", "La Puerta (Mérida)", "Cierre"]);
+
+  const [gancho] = sections;
+  assert.deepEqual(gancho.cues, [{ kind: "MÚSICA", description: "ambiente épico con cuerdas sutiles y percusión ligera" }]);
+  const lines = parseScript(gancho.script).filter((s) => s.type === "line");
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].type === "line" && lines[0].direction, "voz seria, pausada, llena de asombro");
+  assert.doesNotMatch(gancho.script.split("\n").filter((l) => !l.startsWith("#")).join(" "), /MÚSICA|Tono:/);
+
+  const sierra = parseScript(sections[3].script);
+  assert.deepEqual(sierra[sierra.length - 1], { type: "pause", ms: 2000 });
+});
+
+test("también reconoce títulos markdown y en negrita sin corchetes", () => {
+  const sections = importTechnicalScript("### BLOQUE 1 — GANCHO\nHola.\n**BLOQUE 2 — PICO BOLÍVAR**\nEl punto más alto.");
+  assert.deepEqual(sections.map((s) => s.title), ["Gancho", "Pico Bolívar"]);
+  // Un párrafo que empieza por "Parte" no es un bloque.
+  assert.equal(importTechnicalScript("[BLOQUE 1 — X]\nParte de la selva es virgen.").length, 1);
 });

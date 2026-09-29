@@ -24,7 +24,25 @@ export interface ImportedSection {
   cues: ProductionCue[];
 }
 
-const SECTION_RE = /\[\s*((?:BLOQUE|ESCENA|SECCI[OÓ]N|PARTE|CAP[IÍ]TULO|SEGMENTO|EPISODIO|AUDIO)\b[^\]]*)\]/i;
+const SECTION_WORDS = "BLOQUE|ESCENA|SECCI[OÓ]N|PARTE|CAP[IÍ]TULO|SEGMENTO|EPISODIO|AUDIO";
+// [BLOQUE 1 — GANCHO]
+const SECTION_RE = new RegExp(`\\[\\s*((?:${SECTION_WORDS})\\b[^\\]]*)\\]`, "i");
+// Marcas mal cerradas que escriben a veces los modelos: "[BLOQUE 6 — SIERRA NEVADA**" (sin corchete de cierre).
+const OPEN_SECTION_RE = new RegExp(`^[#*_\\s>]*\\[\\s*((?:${SECTION_WORDS})\\s*\\d+\\b[^\\]]*?)[\\s*_]*$`, "i");
+// Títulos markdown o en negrita sin corchetes: "### BLOQUE 3 — X", "**BLOQUE 3 — X**".
+const HEADING_SECTION_RE = new RegExp(`^(?:#{1,6}\\s*|[*_]{2})[*_\\s]*((?:${SECTION_WORDS})\\s*\\d+\\b.*?)[\\s*_]*$`, "i");
+// Indicaciones de producción dentro de un párrafo: "... (MÚSICA: épica) (Tono: seria) (Pausa de 2 segundos)".
+const INLINE_MARK_RE = /\(\s*((?:m[uú]sica|efectos?(?: de sonido)?(?:\s*\/\s*sfx)?|sfx|fx|sonido|ambiente|cortina|r[aá]faga|tono)\s*:[^()]*|pausa\b[^()]*)\)/gi;
+
+function matchSection(line: string): string | null {
+  const m = line.match(SECTION_RE) ?? line.match(OPEN_SECTION_RE) ?? line.match(HEADING_SECTION_RE);
+  return m ? m[1].replace(/[\s*_\]]+$/, "").trim() : null;
+}
+
+// Número de marcas de bloque que aparecen en el texto, para avisar si alguna no se pudo leer.
+export function countBlockMarkers(text: string): number {
+  return text.split(/\r?\n/).filter((l) => new RegExp(`^[#*_\\s>\\[]*(?:${SECTION_WORDS})\\s*\\d+`, "i").test(l.trim())).length;
+}
 const CUE_RE = /^(M[UÚ]SICA|EFECTOS?(?: DE SONIDO)?(?:\s*\/\s*SFX)?|SFX|FX|SONIDO|AMBIENTE|CORTINA|R[AÁ]FAGA)\s*:\s*(.*)$/i;
 const PAUSE_DIRECTION_RE = /^pausa\b(?:\s*de)?\s*(\d+(?:[.,]\d+)?)?\s*(segundos?|seg|s|ms|milisegundos)?/i;
 const INLINE_SPEAKER_RE = /^([A-ZÁÉÍÓÚÑÜ][A-ZÁÉÍÓÚÑÜ .]{1,30})\s*:\s*(.+)$/;
@@ -64,7 +82,9 @@ function titleCase(text: string): string {
       if (/^\s+$/.test(word)) return word;
       const capitalize = startOfPhrase || !MINOR_WORDS.has(word);
       startOfPhrase = /[:.—–-]$/.test(word);
-      return capitalize ? word.charAt(0).toLocaleUpperCase("es") + word.slice(1) : word;
+      // "(mérida)" -> "(Mérida)": se capitaliza la primera letra aunque vaya tras un signo.
+      const i = word.search(/\p{L}/u);
+      return capitalize && i >= 0 ? word.slice(0, i) + word.charAt(i).toLocaleUpperCase("es") + word.slice(i + 1) : word;
     })
     .join("");
 }
@@ -88,12 +108,12 @@ function pauseMs(amount?: string, unit?: string): number {
 }
 
 export function looksLikeTechnicalScript(text: string): boolean {
-  return SECTION_RE.test(text) || /\*\(\s*tono\s*:/i.test(text) || /\(\s*(?:m[uú]sica|sfx)\s*:/i.test(text);
+  return text.split(/\r?\n/).some((l) => matchSection(l.trim()) !== null) || /\*\(\s*tono\s*:/i.test(text) || /\(\s*(?:m[uú]sica|sfx)\s*:/i.test(text);
 }
 
 export function importTechnicalScript(text: string): ImportedSection[] {
   const lines = text.split(/\r?\n/);
-  const hasSections = lines.some((l) => SECTION_RE.test(l));
+  const hasSections = lines.some((l) => matchSection(l.trim()) !== null);
   const sections: { title: string; out: string[]; cues: ProductionCue[] }[] = [];
   let current: (typeof sections)[number] | null = hasSections ? null : { title: "Audio 1", out: [], cues: [] };
   if (current) sections.push(current);
@@ -105,9 +125,9 @@ export function importTechnicalScript(text: string): ImportedSection[] {
     const line = rawLine.trim();
     if (!line || /^[-*_]{3,}$/.test(line)) continue;
 
-    const sectionMatch = line.match(SECTION_RE);
-    if (sectionMatch) {
-      current = { title: sectionTitle(stripMarkdown(sectionMatch[1])), out: [], cues: [] };
+    const sectionLabel = matchSection(line);
+    if (sectionLabel) {
+      current = { title: sectionTitle(stripMarkdown(sectionLabel)), out: [], cues: [] };
       sections.push(current);
       tone = "";
       oneOff = [];
@@ -137,20 +157,51 @@ export function importTechnicalScript(text: string): ImportedSection[] {
       continue;
     }
 
-    const emphasis = boldWords(line);
-    let spoken = stripMarkdown(line);
-    let speaker = DEFAULT_SPEAKER;
-    const inline = spoken.match(INLINE_SPEAKER_RE);
-    if (inline) {
-      speaker = inline[1].trim();
-      spoken = inline[2];
+    // Indicaciones dentro del párrafo: la música y los efectos van a la hoja de producción, el tono se aplica
+    // al párrafo y las pausas se colocan en su sitio. No se locutan.
+    const pieces: ({ text: string } | { pauseMs: number })[] = [];
+    let last = 0;
+    for (const m of line.matchAll(INLINE_MARK_RE)) {
+      pieces.push({ text: line.slice(last, m.index) });
+      last = (m.index ?? 0) + m[0].length;
+      const inner = m[1].trim();
+      const cue = inner.match(CUE_RE);
+      const pause = inner.match(PAUSE_DIRECTION_RE);
+      const toneMatch = inner.match(/^tono\s*:\s*(.+)$/i);
+      if (toneMatch) tone = cleanDirection(toneMatch[1]);
+      else if (cue) {
+        const kind = cue[1].toUpperCase().replace(/\s*\/\s*SFX/, "").replace(/^EFECTOS?( DE SONIDO)?$/, "SFX");
+        current.cues.push({ kind, description: cue[2].trim() });
+        current.out.push(`# ${kind}: ${cue[2].trim()}`);
+      } else if (pause) {
+        pieces.push({ pauseMs: /t[aá]ctica|dram[aá]tica/i.test(inner) && !pause[1] ? TACTICAL_PAUSE_MS : pauseMs(pause[1], pause[2]) });
+      }
     }
-    const direction = [tone, ...oneOff, emphasis.length ? `enfatiza ${emphasis.map((w) => `«${w}»`).join(", ")}` : ""]
-      .filter(Boolean)
-      .map(cleanDirection)
-      .join("; ");
-    current.out.push(direction ? `${speaker} (${direction}): ${spoken}` : `${speaker}: ${spoken}`);
-    oneOff = [];
+    pieces.push({ text: line.slice(last) });
+
+    for (const piece of pieces) {
+      if ("pauseMs" in piece) {
+        current.out.push(`[PAUSA ${piece.pauseMs}ms]`);
+        continue;
+      }
+      const raw = piece.text.trim();
+      if (!raw) continue;
+      const emphasis = boldWords(raw);
+      let spoken = stripMarkdown(raw);
+      let speaker = DEFAULT_SPEAKER;
+      const inline = spoken.match(INLINE_SPEAKER_RE);
+      if (inline) {
+        speaker = inline[1].trim();
+        spoken = inline[2];
+      }
+      if (!spoken.trim()) continue;
+      const direction = [tone, ...oneOff, emphasis.length ? `enfatiza ${emphasis.map((w) => `«${w}»`).join(", ")}` : ""]
+        .filter(Boolean)
+        .map(cleanDirection)
+        .join("; ");
+      current.out.push(direction ? `${speaker} (${direction}): ${spoken}` : `${speaker}: ${spoken}`);
+      oneOff = [];
+    }
   }
 
   return sections
