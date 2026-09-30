@@ -42,7 +42,13 @@ import {
   readImageFile,
   saveImageFile,
   videoPath,
+  ensureMusicPlan,
+  MUSIC_TYPES,
+  musicFilePath,
+  saveMusicFile,
+  MusicTrack,
 } from "./projects";
+import { DEFAULT_MUSIC_MODEL, generateMusic, musicPrompt } from "./musicEngine";
 import { BUILTIN_FORMAT } from "../src/lib/formats";
 import { buildDirectionPrompt, narrationOf, parseDirection } from "../src/lib/imageDirection";
 import { queueVideoRender, videoBlocker } from "./videoJob";
@@ -394,11 +400,16 @@ const viewOf = (project: Awaited<ReturnType<typeof getProject>>) =>
   );
 
 // Crea los prompts de imagen que falten con las plantillas del formato del proyecto (o el formato base).
+const FALLBACK_MUSIC_MOOD = "cinematic documentary score, atmospheric strings and soft piano, slow build";
+
 async function withImagePrompts(project: Awaited<ReturnType<typeof getProject>>) {
-  const needs = !project.thumbnail || project.sections.some((s) => !s.images?.length);
+  const needs = !project.thumbnail || project.sections.some((s) => !s.images?.length) || !project.music;
   if (!needs) return project;
   const format = project.formatId ? await getFormat(project.formatId).catch(() => BUILTIN_FORMAT) : BUILTIN_FORMAT;
-  return mutateProject(project.id, (p) => void ensureImagePrompts(p, { variaciones: format.visuales.variaciones, miniatura: format.miniatura }));
+  return mutateProject(project.id, (p) => {
+    ensureImagePrompts(p, { variaciones: format.visuales.variaciones, miniatura: format.miniatura });
+    ensureMusicPlan(p, FALLBACK_MUSIC_MOOD);
+  });
 }
 
 function sendError(res: express.Response, error: any, fallback: string) {
@@ -448,7 +459,21 @@ app.get("/api/projects/:id", async (req, res) => {
 
 app.patch("/api/projects/:id", async (req, res) => {
   try {
-    const { name, direction, voices, sections, model, imageModel, imagePrompts } = req.body;
+    const { name, direction, voices, sections, model, imageModel, imagePrompts, music } = req.body;
+    // Ajustes de la música de fondo: { enabled?, volume?, prompts?: [{ n, prompt }] }
+    if (music && typeof music === "object") {
+      await withImagePrompts(await getProject(req.params.id));
+      await mutateProject(req.params.id, (p) => {
+        if (!p.music) return;
+        if (typeof music.enabled === "boolean") p.music.enabled = music.enabled;
+        if (typeof music.volume === "number" && Number.isFinite(music.volume)) p.music.volume = Math.min(Math.max(music.volume, 0), 1);
+        if (typeof music.model === "string" && music.model.trim()) p.music.model = music.model.trim().slice(0, 200);
+        for (const change of Array.isArray(music.prompts) ? music.prompts : []) {
+          const track = p.music.tracks[Number(change?.n)];
+          if (track && typeof change?.prompt === "string") track.prompt = change.prompt.slice(0, 1000);
+        }
+      });
+    }
     // Cambios de prompts de imagen: [{ target: "thumbnail" | "<sectionId>:<n>", prompt }]
     if (Array.isArray(imagePrompts) || typeof imageModel === "string") {
       await mutateProject(req.params.id, (p) => {
@@ -695,6 +720,87 @@ app.get("/api/projects/:id/images/:file", async (req, res) => {
     res.send(data);
   } catch (error) {
     sendError(res, error, "Error al leer la imagen.");
+  }
+});
+
+// --- Música de fondo (OpenRouter, Google Lyria): un tramo por cambio de ambiente del guion ---
+
+async function updateTrack(projectId: string, n: number, fn: (t: MusicTrack) => void) {
+  return mutateProject(projectId, (p) => {
+    const track = p.music?.tracks[n];
+    if (track) fn(track);
+  });
+}
+
+app.post("/api/projects/:id/music/generate", async (req, res) => {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) return res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+  try {
+    const project = await withImagePrompts(await getProject(req.params.id));
+    const tracks = project.music?.tracks ?? [];
+    const { n } = req.body ?? {};
+    let targets = Number.isInteger(n) ? [n as number] : tracks.map((t, i) => (t.status === "done" ? -1 : i)).filter((i) => i >= 0);
+    targets = targets.filter((i) => tracks[i] && !activeImageJobs.has(`${project.id}:music:${i}`));
+    if (!targets.length) return res.json(viewOf(project));
+
+    const model = project.music?.model || process.env.OPENROUTER_MUSIC_MODEL || DEFAULT_MUSIC_MODEL;
+    for (const i of targets) activeImageJobs.add(`${project.id}:music:${i}`);
+    await mutateProject(project.id, (p) => {
+      for (const i of targets) Object.assign(p.music!.tracks[i], { status: "generating", error: undefined });
+    });
+
+    let lastError = "";
+    await mapLimit(targets, 2, async (i) => {
+      try {
+        const music = await generateMusic({ apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined }, { model, prompt: musicPrompt(tracks[i].prompt, project.name) });
+        const previous = (await getProject(project.id)).music?.tracks[i]?.file;
+        const name = `music-${i}.${music.ext}`;
+        await saveMusicFile(project.id, name, music.data, previous);
+        await updateTrack(project.id, i, (t) => Object.assign(t, { status: "done", file: name, source: "ai", generatedAt: new Date().toISOString(), error: undefined }));
+      } catch (error: any) {
+        lastError = error?.message || "Error al generar la música.";
+        console.error("Music Error:", error);
+        await updateTrack(project.id, i, (t) => Object.assign(t, { status: "error", error: lastError }));
+      } finally {
+        activeImageJobs.delete(`${project.id}:music:${i}`);
+      }
+    });
+    const updated = viewOf(await getProject(project.id));
+    if (lastError && targets.length === 1) return res.status(502).json({ error: lastError, project: updated });
+    res.json(updated);
+  } catch (error) {
+    sendError(res, error, "Error al generar la música.");
+  }
+});
+
+// Sube una pista propia para un tramo (cuerpo binario, Content-Type audio/*).
+app.post("/api/projects/:id/music/upload", express.raw({ type: "audio/*", limit: "60mb" }), async (req, res) => {
+  try {
+    const type = String(req.headers["content-type"] ?? "").split(";")[0];
+    const ext = ({ "audio/wav": "wav", "audio/x-wav": "wav", "audio/wave": "wav", "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/ogg": "ogg", "audio/flac": "flac", "audio/x-flac": "flac" } as Record<string, string>)[type];
+    if (!ext || !Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: "Sube un audio WAV, MP3, OGG o FLAC." });
+    const n = Number(req.query.n);
+    const project = await withImagePrompts(await getProject(req.params.id));
+    const track = project.music?.tracks[n];
+    if (!Number.isInteger(n) || !track) return res.status(404).json({ error: "Tramo de música no encontrado." });
+    const name = `music-${n}.${ext}`;
+    await saveMusicFile(project.id, name, req.body, track.file);
+    const updated = await updateTrack(project.id, n, (t) => Object.assign(t, { status: "done", file: name, source: "upload", generatedAt: new Date().toISOString(), error: undefined }));
+    res.json(viewOf(updated));
+  } catch (error) {
+    sendError(res, error, "Error al subir la música.");
+  }
+});
+
+app.get("/api/projects/:id/music/:file", async (req, res) => {
+  try {
+    await getProject(req.params.id);
+    res.set({ "Content-Type": MUSIC_TYPES[req.params.file.split(".").pop() ?? ""] ?? "application/octet-stream", "Cache-Control": "private, max-age=3600" });
+    res.sendFile(musicFilePath(req.params.id, req.params.file), (err) => {
+      if (err && !res.headersSent) res.status(404).json({ error: "Pista no encontrada." });
+    });
+  } catch (error) {
+    sendError(res, error, "Error al leer la música.");
   }
 });
 

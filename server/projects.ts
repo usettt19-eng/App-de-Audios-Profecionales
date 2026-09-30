@@ -8,9 +8,32 @@ import type { ProductionCue } from "../src/lib/technicalScript";
 import { importTechnicalScript } from "../src/lib/technicalScript";
 import type { VisualVariation } from "../src/lib/formats";
 import { buildImagePrompts, fillTemplate, subjectForSection, thumbnailSubject } from "../src/lib/imagePrompts";
+import { planMusicTracks } from "../src/lib/musicPlan";
 import { createZip } from "./zip";
 
 export type SectionStatus = "pending" | "generating" | "done" | "error";
+
+// Música de fondo: tramos (uno por cambio de ambiente del guion) mezclados bajo la narración en el video.
+export interface MusicTrack {
+  // Bloque en el que empieza el tramo; suena hasta el bloque en que empieza el siguiente.
+  startIndex: number;
+  prompt: string;
+  status: SectionStatus;
+  error?: string;
+  file?: string;
+  source?: "ai" | "upload";
+  generatedAt?: string;
+}
+
+export interface ProjectMusic {
+  enabled: boolean;
+  // Volumen de la música respecto a la voz (0-1), antes de bajarla automáticamente cuando habla el narrador.
+  volume: number;
+  model?: string;
+  tracks: MusicTrack[];
+}
+
+export const DEFAULT_MUSIC_VOLUME = 0.18;
 
 // Video final montado con ffmpeg a partir de los audios y las imágenes de los bloques.
 export interface ProjectVideo {
@@ -67,6 +90,7 @@ export interface Project {
   imagePlan?: "template" | "ai";
   thumbnail?: ProjectImage;
   video?: ProjectVideo;
+  music?: ProjectMusic;
   sections: ProjectSection[];
   createdAt: string;
   updatedAt: string;
@@ -75,8 +99,10 @@ export interface Project {
 export type ProjectView = Project & { sections: (ProjectSection & { stale: boolean })[]; videoStale?: boolean };
 
 // Huella de lo que entra en el video: audio e imágenes de cada bloque (y sus versiones).
-export function videoFingerprint(project: Pick<Project, "sections">): string {
-  const parts = project.sections.map((s) => [s.generatedAt ?? "", ...(s.images ?? []).map((i) => (i.status === "done" ? `${i.file}@${i.generatedAt}` : ""))]);
+export function videoFingerprint(project: Pick<Project, "sections" | "music">): string {
+  const parts: unknown[] = project.sections.map((s) => [s.generatedAt ?? "", ...(s.images ?? []).map((i) => (i.status === "done" ? `${i.file}@${i.generatedAt}` : ""))]);
+  const m = project.music;
+  if (m?.enabled) parts.push(["music", m.volume, ...m.tracks.map((t) => (t.status === "done" ? `${t.startIndex}:${t.file}@${t.generatedAt}` : ""))]);
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex");
 }
 
@@ -125,6 +151,12 @@ export function toView(
     ...project,
     video,
     videoStale: video?.status === "done" && video.renderedFrom !== videoFingerprint(project),
+    music: project.music && {
+      ...project.music,
+      tracks: project.music.tracks.map((t, n) =>
+        t.status === "generating" && !isImageActive(`music:${n}`) ? { ...t, status: "error" as const, error: "La generación se interrumpió. Vuelve a intentarlo." } : t
+      ),
+    },
     thumbnail: project.thumbnail && imageView(project.thumbnail, "thumbnail"),
     sections: project.sections.map((s) => {
       const interrupted = s.status === "generating" && !isActive(s.id);
@@ -272,6 +304,33 @@ export function ensureImagePrompts(project: Project, visuals: { variaciones: Vis
   return changed;
 }
 
+// Crea los tramos de música desde las indicaciones (MÚSICA: …) del guion, si el proyecto aún no los tiene.
+export function ensureMusicPlan(project: Project, fallbackMood: string): boolean {
+  if (project.music) return false;
+  project.music = {
+    enabled: true,
+    volume: DEFAULT_MUSIC_VOLUME,
+    tracks: planMusicTracks(project.sections, fallbackMood).map((t) => ({ startIndex: t.startIndex, prompt: t.mood, status: "pending" })),
+  };
+  return true;
+}
+
+const MUSIC_FILE_RE = /^music-\d+\.(wav|mp3|ogg|flac)$/;
+export const MUSIC_TYPES: Record<string, string> = { wav: "audio/wav", mp3: "audio/mpeg", ogg: "audio/ogg", flac: "audio/flac" };
+
+export async function saveMusicFile(projectId: string, name: string, data: Buffer, previous?: string): Promise<void> {
+  if (!MUSIC_FILE_RE.test(name)) throw new Error("Nombre de pista no válido.");
+  const file = path.join(projectDir(projectId), name);
+  await fs.writeFile(`${file}.tmp`, data);
+  await fs.rename(`${file}.tmp`, file);
+  if (previous && previous !== name && MUSIC_FILE_RE.test(previous)) await fs.rm(path.join(projectDir(projectId), previous), { force: true });
+}
+
+export function musicFilePath(projectId: string, name: string): string {
+  if (!MUSIC_FILE_RE.test(name)) throw new NotFoundError("Pista no encontrada.");
+  return path.join(projectDir(projectId), name);
+}
+
 const IMAGE_FILE_RE = /^(thumbnail|[0-9a-f-]{36}-\d+)\.(png|jpg|webp)$/;
 export const IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", webp: "image/webp" };
 
@@ -352,6 +411,12 @@ export async function buildProjectZip(project: Project): Promise<Buffer> {
       const base = sectionFileName(i, section).replace(/\.wav$/, "");
       entries.push({ name: `imagenes/${base} - ${n + 1} ${safeFileName(img.variation)}.${ext}`, data: await readImageFile(project.id, img.file) });
     }
+  }
+  for (const [n, track] of (project.music?.tracks ?? []).entries()) {
+    if (track.status !== "done" || !track.file) continue;
+    const from = project.sections[track.startIndex];
+    const label = from ? sectionFileName(track.startIndex, from).replace(/\.wav$/, "") : `bloque ${track.startIndex + 1}`;
+    entries.push({ name: `musica/${String(n + 1).padStart(2, "0")} - desde ${label}.${track.file.split(".").pop()}`, data: await fs.readFile(musicFilePath(project.id, track.file)) });
   }
   if (project.thumbnail?.status === "done" && project.thumbnail.file) {
     entries.push({ name: `miniatura.${project.thumbnail.file.split(".").pop()}`, data: await readImageFile(project.id, project.thumbnail.file) });

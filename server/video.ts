@@ -95,3 +95,38 @@ export function runFfmpeg(args: string[]): Promise<void> {
     child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg falló (código ${code}): ${stderr.trim().split("\n").slice(-3).join(" ")}`))));
   });
 }
+
+export interface MusicSpan {
+  file: string;
+  durationSec: number;
+}
+
+const MUSIC_FADE = 2;
+
+// Mezcla la música bajo la voz del video ya montado: cada tramo se repite hasta cubrir su duración,
+// con fundidos en los cambios; la música baja sola cuando habla el narrador (compresión sidechain).
+export function mixMusicArgs(video: string, spans: MusicSpan[], volume: number, output: string): string[] {
+  const args = ["-y", "-hide_banner", "-loglevel", "error", "-i", video];
+  for (const span of spans) args.push("-i", span.file);
+  const filters: string[] = [];
+  spans.forEach((span, j) => {
+    const d = Math.max(span.durationSec, 0.1);
+    const fade = Math.min(MUSIC_FADE, d / 4);
+    filters.push(
+      `[${j + 1}:a]aloop=loop=-1:size=2147483647,atrim=0:${d.toFixed(3)},asetpts=PTS-STARTPTS,` +
+        `aformat=sample_rates=48000:channel_layouts=stereo,afade=t=in:d=${fade.toFixed(2)},afade=t=out:st=${(d - fade).toFixed(3)}:d=${fade.toFixed(2)}[m${j}]`
+    );
+  });
+  filters.push(`${spans.map((_, j) => `[m${j}]`).join("")}concat=n=${spans.length}:v=0:a=1,volume=${volume.toFixed(3)}[bed]`);
+  filters.push(`[0:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice][key]`);
+  filters.push(`[bed][key]sidechaincompress=threshold=0.03:ratio=6:attack=20:release=400[ducked]`);
+  filters.push(`[voice][ducked]amix=inputs=2:duration=first:normalize=0[aout]`);
+  args.push(
+    "-filter_complex", filters.join(";"),
+    "-map", "0:v", "-map", "[aout]",
+    "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+    "-movflags", "+faststart",
+    output
+  );
+  return args;
+}

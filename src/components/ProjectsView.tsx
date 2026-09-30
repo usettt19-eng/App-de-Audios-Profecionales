@@ -8,6 +8,7 @@ import { parseVoiceDirection } from "../lib/voiceDirection";
 import { ErrorNote } from "./AudioScriptStudio";
 import ScriptGenerator from "./ScriptGenerator";
 import ImageTile, { ProjectImage } from "./ImageTile";
+import MusicPanel, { ProjectMusic } from "./MusicPanel";
 import { DOCUMENTARY_VOICE_DIRECTION } from "../lib/scriptTemplates";
 import { BUILTIN_FORMAT, BUILTIN_FORMAT_ID, ProductionFormat } from "../lib/formats";
 import {
@@ -50,6 +51,7 @@ interface Project {
     finishedAt?: string;
   };
   videoStale?: boolean;
+  music?: ProjectMusic;
   sections: Section[];
   updatedAt: string;
 }
@@ -381,7 +383,7 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
   const applyServerSections = (p: Project) =>
     setProject((prev) =>
       prev
-        ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel, imagePlan: p.imagePlan, video: p.video, videoStale: p.videoStale }
+        ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel, imagePlan: p.imagePlan, video: p.video, videoStale: p.videoStale, music: p.music }
         : p
     );
 
@@ -653,6 +655,13 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
             audiosMissing={project.sections.length - done}
             imagesDone={imagesDone}
             onRender={renderVideo}
+          />
+          <MusicPanel<Project>
+            projectId={id}
+            music={project.music}
+            sectionTitles={project.sections.map((s) => s.title)}
+            onProject={applyServerSections}
+            onError={setError}
           />
           <div className={panelClass}>
             <div className="flex items-center gap-2">
@@ -933,7 +942,7 @@ function VideoPanel({
               </a>
               {project.videoStale && (
                 <p className="flex gap-1.5 text-[11px] text-amber-300">
-                  <TriangleAlert className="w-3.5 h-3.5 shrink-0" /> Hay audios o imágenes nuevos desde el último montaje.
+                  <TriangleAlert className="w-3.5 h-3.5 shrink-0" /> Hay audios, imágenes o música nuevos desde el último montaje.
                 </p>
               )}
             </>
@@ -943,7 +952,10 @@ function VideoPanel({
             <Film className="w-4 h-4" /> {video?.status === "done" ? "Volver a montar el video" : "Generar video"}
           </button>
           <p className="text-[10px] text-slate-500">
-            {blocker ?? "Ken Burns y fundidos entre las imágenes de cada bloque, sincronizado con su narración. MP4 1920×1080 a 30 fps."}
+            {blocker ??
+              `Ken Burns y fundidos entre las imágenes de cada bloque, sincronizado con su narración. MP4 1920×1080 a 30 fps.${
+                project.music?.enabled && project.music.tracks.some((t) => t.status === "done") ? " Incluye la música de fondo." : ""
+              }`}
           </p>
         </>
       )}

@@ -51,6 +51,16 @@ El panel **Video** del proyecto monta el documental siguiendo el proceso de `mon
 - Si cambian audios o imágenes después del montaje, el panel avisa de que el video está desactualizado.
 - El video se descarga aparte (no va en el ZIP, por tamaño).
 
+## Música de fondo según el guion (OpenRouter · Google Lyria 3)
+
+El panel **Música de fondo** compone la banda sonora a partir de las indicaciones del guion, con la misma clave `OPENROUTER_API_KEY`:
+
+- **Un tramo por cambio de ambiente:** cada bloque con una indicación `(MÚSICA: …)` empieza un tramo nuevo con ese ambiente; los bloques sin indicación siguen con la música anterior. Indicaciones como "Fading out" o "se apaga" no crean tramo. Si el primer bloque no tiene indicación, usa un ambiente cinematográfico por defecto.
+- El ambiente de cada tramo se puede editar antes de generar. Siempre se pide música **instrumental, sin voces** y discreta para ir bajo un narrador.
+- Modelo por defecto `google/lyria-3-pro-preview` (canciones completas, unos 0,08 US$ cada una), o el de `OPENROUTER_MUSIC_MODEL` (p. ej. `google/lyria-3-clip-preview`, clips de 30 s, más barato). Cada tramo se puede regenerar o reemplazar subiendo un audio propio (WAV, MP3, OGG o FLAC).
+- **En el video:** cada tramo se repite hasta cubrir sus bloques, se funde en los cambios y al final, suena al volumen elegido (18 % por defecto) y **baja sola cuando habla el narrador** (compresión sidechain). Se puede desactivar con "Incluir la música en el video".
+- El ZIP incluye las pistas en `musica/`.
+
 ## Guiones generados con IA
 
 En **Nuevo proyecto → Generar guion con IA** escribes el título del documental (y, si quieres, indicaciones adicionales, duración y número de estructuras) y la app escribe el guion completo con un modelo de texto de OpenRouter, en vivo, usando el prompt del proceso documental:
@@ -182,6 +192,7 @@ API:
 - `POST /api/projects/:id/sections/:sectionId/generate`
 - `GET /api/projects/:id/sections/:sectionId/audio` (`?download=1` para descargar)
 - `GET /api/projects/:id/zip`
+- `POST /api/projects/:id/music/generate` (`{ n? }`) → compone los tramos pendientes (o el tramo `n`); `POST /api/projects/:id/music/upload?n=` sube una pista propia; `PATCH /api/projects/:id` con `{ music: { enabled, volume, prompts: [{ n, prompt }] } }`
 - `POST /api/projects/:id/video/render` → monta el video en segundo plano; `GET /api/projects/:id/video` (`?download=1`)
 - `POST /api/projects/:id/images/plan` `{ force? }` → prompts de imagen escritos por el director de arte
 - `GET /api/image-models`; `POST /api/projects/:id/images/generate` `{ sectionId, n? } | { thumbnail: true }`
@@ -219,7 +230,7 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
 | `YOUTUBE_API_KEY` | Opcional: datos exactos de canales para el análisis de Ideas |
-| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `OPENROUTER_IMAGE_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
+| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `OPENROUTER_IMAGE_MODEL`, `OPENROUTER_MUSIC_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
 Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.
 
