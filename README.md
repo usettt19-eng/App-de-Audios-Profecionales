@@ -36,6 +36,21 @@ Cada proyecto prepara las imágenes de cada bloque con las plantillas visuales d
 - **Generar imágenes pendientes** recorre todos los bloques y la miniatura; cada imagen se puede regenerar, editar su prompt o reemplazar subiendo una propia (PNG, JPG o WebP).
 - El ZIP del proyecto incluye `imagenes/NN - Bloque - N Toma.png` y `miniatura.png`.
 
+## Video final (ffmpeg)
+
+El panel **Video** del proyecto monta el documental siguiendo el proceso de `montar_video.py`, sin instalar nada en tu PC (ffmpeg va dentro del contenedor Docker):
+
+1. Mide la duración exacta del audio de cada bloque.
+2. Aplica el efecto Ken Burns a cada imagen (acercamiento, alejamiento y paneo, alternados).
+3. Funde las imágenes de cada bloque entre sí.
+4. Cada segmento dura exactamente lo que su narración.
+5. Concatena todo en un MP4 **1920×1080 a 30 fps** (H.264 + AAC), listo para YouTube.
+
+- Requiere todos los audios generados y al menos una imagen. Un bloque sin imágenes propias usa las del bloque anterior (o la miniatura).
+- El montaje corre en segundo plano, de un proyecto a la vez y con prioridad baja (`nice`), para no frenar otros servicios del servidor; se puede cerrar la página. `VIDEO_THREADS` (por defecto 2) limita los hilos de ffmpeg. Calcula del orden de un minuto de montaje por minuto de video.
+- Si cambian audios o imágenes después del montaje, el panel avisa de que el video está desactualizado.
+- El video se descarga aparte (no va en el ZIP, por tamaño).
+
 ## Guiones generados con IA
 
 En **Nuevo proyecto → Generar guion con IA** escribes el título del documental (y, si quieres, indicaciones adicionales, duración y número de estructuras) y la app escribe el guion completo con un modelo de texto de OpenRouter, en vivo, usando el prompt del proceso documental:
@@ -167,6 +182,7 @@ API:
 - `POST /api/projects/:id/sections/:sectionId/generate`
 - `GET /api/projects/:id/sections/:sectionId/audio` (`?download=1` para descargar)
 - `GET /api/projects/:id/zip`
+- `POST /api/projects/:id/video/render` → monta el video en segundo plano; `GET /api/projects/:id/video` (`?download=1`)
 - `POST /api/projects/:id/images/plan` `{ force? }` → prompts de imagen escritos por el director de arte
 - `GET /api/image-models`; `POST /api/projects/:id/images/generate` `{ sectionId, n? } | { thumbnail: true }`
 - `POST /api/projects/:id/images/upload?target=<sectionId>:<n>|thumbnail` (cuerpo: la imagen); `GET /api/projects/:id/images/:archivo`

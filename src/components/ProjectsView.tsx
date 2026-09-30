@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, CheckCircle2, ImageIcon, Clock, Download, FileUp, FolderOpen, FolderPlus, Loader2, Music, Pencil, Play, RefreshCw, Sparkles, Square, Trash2, TriangleAlert,
+  ArrowLeft, CheckCircle2, Film, ImageIcon, Clock, Download, FileUp, FolderOpen, FolderPlus, Loader2, Music, Pencil, Play, RefreshCw, Sparkles, Square, Trash2, TriangleAlert,
 } from "lucide-react";
 import { estimateDurationSeconds, listSpeakers, parseScript } from "../lib/scriptParser";
 import { countBlockMarkers, importTechnicalScript } from "../lib/technicalScript";
@@ -41,6 +41,15 @@ interface Project {
   imageModel?: string;
   imagePlan?: "template" | "ai";
   thumbnail?: ProjectImage;
+  video?: {
+    status: "rendering" | "done" | "error";
+    progress: number;
+    total: number;
+    error?: string;
+    durationSec?: number;
+    finishedAt?: string;
+  };
+  videoStale?: boolean;
   sections: Section[];
   updatedAt: string;
 }
@@ -370,7 +379,30 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
 
   // Respuesta del servidor: bloques (audio e imágenes), miniatura y modelo de imagen son la fuente de verdad.
   const applyServerSections = (p: Project) =>
-    setProject((prev) => (prev ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel, imagePlan: p.imagePlan } : p));
+    setProject((prev) =>
+      prev
+        ? { ...prev, sections: p.sections, thumbnail: p.thumbnail, imageModel: p.imageModel, imagePlan: p.imagePlan, video: p.video, videoStale: p.videoStale }
+        : p
+    );
+
+  // --- Video ---
+  const renderVideo = async () => {
+    try {
+      applyServerSections(await api<Project>(`/api/projects/${id}/video/render`, { method: "POST" }));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
+  // Mientras se monta el video, se consulta el progreso cada pocos segundos.
+  const videoRendering = project?.video?.status === "rendering";
+  useEffect(() => {
+    if (!videoRendering) return;
+    const timer = setInterval(() => {
+      api<Project>(`/api/projects/${id}`).then(applyServerSections).catch(() => undefined);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [videoRendering, id]);
 
   // --- Imágenes ---
   const [imageModels, setImageModels] = useState<ImageModel[]>([]);
@@ -615,6 +647,13 @@ function ProjectDetail({ id, onBack }: { id: string; onBack: () => void }) {
         </div>
 
         <div className="lg:col-span-4 flex flex-col gap-4">
+          <VideoPanel
+            projectId={id}
+            project={project}
+            audiosMissing={project.sections.length - done}
+            imagesDone={imagesDone}
+            onRender={renderVideo}
+          />
           <div className={panelClass}>
             <div className="flex items-center gap-2">
               <ImageIcon className="w-4 h-4 text-fuchsia-400" />
@@ -843,6 +882,70 @@ function SectionCard({
             <Download className="w-3.5 h-3.5" /> WAV
           </a>
         </div>
+      )}
+    </div>
+  );
+}
+
+function VideoPanel({
+  projectId, project, audiosMissing, imagesDone, onRender,
+}: {
+  projectId: string;
+  project: Project;
+  audiosMissing: number;
+  imagesDone: number;
+  onRender: () => void;
+}) {
+  const video = project.video;
+  const rendering = video?.status === "rendering";
+  const blocker = audiosMissing > 0 ? (audiosMissing === 1 ? "Falta 1 audio." : `Faltan ${audiosMissing} audios.`) : imagesDone === 0 ? "Genera al menos una imagen." : null;
+  const src = `/api/projects/${projectId}/video?v=${encodeURIComponent(video?.finishedAt ?? "")}`;
+  const pct = video && video.total ? Math.round((video.progress / video.total) * 100) : 0;
+
+  return (
+    <div className={panelClass}>
+      <div className="flex items-center gap-2">
+        <Film className="w-4 h-4 text-fuchsia-400" />
+        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Video</h3>
+        {video?.status === "done" && video.durationSec !== undefined && (
+          <span className="ml-auto text-[11px] text-slate-500">{formatDuration(video.durationSec)} · 1080p</span>
+        )}
+      </div>
+
+      {rendering ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="flex items-center gap-2 text-[11px] text-slate-300">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            {video!.progress === 0 ? "Preparando el montaje…" : `Montando bloque ${Math.min(video!.progress + 1, video!.total)} de ${video!.total}…`}
+          </p>
+          <div className="h-1.5 rounded-full bg-slate-800 overflow-hidden">
+            <div className="h-full bg-fuchsia-500 transition-all" style={{ width: `${pct}%` }} />
+          </div>
+          <p className="text-[10px] text-slate-500">Puede tardar unos minutos por cada minuto de video. Puedes cerrar la página: sigue en el servidor.</p>
+        </div>
+      ) : (
+        <>
+          {video?.status === "done" && (
+            <>
+              <video controls preload="metadata" src={src} poster={project.thumbnail?.file ? `/api/projects/${projectId}/images/${project.thumbnail.file}` : undefined} className="w-full rounded-md bg-black aspect-video" />
+              <a href={`${src}&download=1`} className={`${chipButtonClass} justify-center py-2 text-slate-200`}>
+                <Download className="w-3.5 h-3.5" /> Descargar MP4
+              </a>
+              {project.videoStale && (
+                <p className="flex gap-1.5 text-[11px] text-amber-300">
+                  <TriangleAlert className="w-3.5 h-3.5 shrink-0" /> Hay audios o imágenes nuevos desde el último montaje.
+                </p>
+              )}
+            </>
+          )}
+          {video?.status === "error" && video.error && <ErrorNote message={video.error} />}
+          <button onClick={onRender} disabled={!!blocker} title={blocker ?? undefined} className={primaryButtonClass}>
+            <Film className="w-4 h-4" /> {video?.status === "done" ? "Volver a montar el video" : "Generar video"}
+          </button>
+          <p className="text-[10px] text-slate-500">
+            {blocker ?? "Ken Burns y fundidos entre las imágenes de cada bloque, sincronizado con su narración. MP4 1920×1080 a 30 fps."}
+          </p>
+        </>
       )}
     </div>
   );

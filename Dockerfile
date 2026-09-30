@@ -13,6 +13,8 @@ LABEL app=audios-pro
 WORKDIR /app
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/data
 COPY package.json package-lock.json ./
+# ffmpeg monta el video final (Ken Burns, fundidos y concatenación).
+RUN apk add --no-cache ffmpeg
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server

@@ -12,6 +12,20 @@ import { createZip } from "./zip";
 
 export type SectionStatus = "pending" | "generating" | "done" | "error";
 
+// Video final montado con ffmpeg a partir de los audios y las imágenes de los bloques.
+export interface ProjectVideo {
+  status: "rendering" | "done" | "error";
+  // Bloques ya montados / total.
+  progress: number;
+  total: number;
+  error?: string;
+  durationSec?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  // Huella de los audios e imágenes usados, para saber si el video quedó desactualizado.
+  renderedFrom?: string;
+}
+
 // Imagen de un bloque (una por variación del formato) o miniatura del video.
 export interface ProjectImage {
   variation: string;
@@ -52,12 +66,19 @@ export interface Project {
   // "ai": los prompts de imagen los escribió el director de arte a partir de la narración de cada bloque.
   imagePlan?: "template" | "ai";
   thumbnail?: ProjectImage;
+  video?: ProjectVideo;
   sections: ProjectSection[];
   createdAt: string;
   updatedAt: string;
 }
 
-export type ProjectView = Project & { sections: (ProjectSection & { stale: boolean })[] };
+export type ProjectView = Project & { sections: (ProjectSection & { stale: boolean })[]; videoStale?: boolean };
+
+// Huella de lo que entra en el video: audio e imágenes de cada bloque (y sus versiones).
+export function videoFingerprint(project: Pick<Project, "sections">): string {
+  const parts = project.sections.map((s) => [s.generatedAt ?? "", ...(s.images ?? []).map((i) => (i.status === "done" ? `${i.file}@${i.generatedAt}` : ""))]);
+  return createHash("sha1").update(JSON.stringify(parts)).digest("hex");
+}
 
 const ID_RE = /^[0-9a-f-]{36}$/;
 export const MAX_SOURCE_CHARS = 300000;
@@ -96,8 +117,14 @@ export function toView(
 ): ProjectView {
   const imageView = (img: ProjectImage, key: string): ProjectImage =>
     img.status === "generating" && !isImageActive(key) ? { ...img, status: "error", error: "La generación se interrumpió. Vuelve a intentarlo." } : img;
+  const video: ProjectVideo | undefined =
+    project.video?.status === "rendering" && !isImageActive("video")
+      ? { ...project.video, status: "error", error: "El montaje se interrumpió. Vuelve a intentarlo." }
+      : project.video;
   return {
     ...project,
+    video,
+    videoStale: video?.status === "done" && video.renderedFrom !== videoFingerprint(project),
     thumbnail: project.thumbnail && imageView(project.thumbnail, "thumbnail"),
     sections: project.sections.map((s) => {
       const interrupted = s.status === "generating" && !isActive(s.id);
@@ -330,4 +357,21 @@ export async function buildProjectZip(project: Project): Promise<Buffer> {
     entries.push({ name: `miniatura.${project.thumbnail.file.split(".").pop()}`, data: await readImageFile(project.id, project.thumbnail.file) });
   }
   return createZip(entries);
+}
+
+export function videoPath(projectId: string): string {
+  return path.join(projectDir(projectId), "video.mp4");
+}
+
+export function projectFolder(projectId: string): string {
+  return projectDir(projectId);
+}
+
+export function sectionAudioFile(projectId: string, sectionId: string): string {
+  return audioPath(projectId, sectionId);
+}
+
+export function imageFilePath(projectId: string, name: string): string {
+  if (!IMAGE_FILE_RE.test(name)) throw new NotFoundError("Imagen no encontrada.");
+  return path.join(projectDir(projectId), name);
 }

@@ -41,9 +41,11 @@ import {
   ProjectImage,
   readImageFile,
   saveImageFile,
+  videoPath,
 } from "./projects";
 import { BUILTIN_FORMAT } from "../src/lib/formats";
 import { buildDirectionPrompt, narrationOf, parseDirection } from "../src/lib/imageDirection";
+import { queueVideoRender, videoBlocker } from "./videoJob";
 
 dotenv.config();
 
@@ -693,6 +695,40 @@ app.get("/api/projects/:id/images/:file", async (req, res) => {
     res.send(data);
   } catch (error) {
     sendError(res, error, "Error al leer la imagen.");
+  }
+});
+
+// --- Video final (ffmpeg): Ken Burns + fundidos por bloque, sincronizado con cada narración ---
+
+app.post("/api/projects/:id/video/render", async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    const key = `${project.id}:video`;
+    if (activeImageJobs.has(key)) return res.status(409).json({ error: "El video ya se está montando." });
+    const blocker = videoBlocker(project);
+    if (blocker) return res.status(400).json({ error: blocker });
+    activeImageJobs.add(key);
+    const updated = await mutateProject(project.id, (p) => {
+      p.video = { status: "rendering", progress: 0, total: p.sections.length, startedAt: new Date().toISOString() };
+    });
+    queueVideoRender(project.id, () => activeImageJobs.delete(key));
+    res.json(viewOf(updated));
+  } catch (error) {
+    sendError(res, error, "Error al iniciar el montaje del video.");
+  }
+});
+
+app.get("/api/projects/:id/video", async (req, res) => {
+  try {
+    const project = await getProject(req.params.id);
+    if (project.video?.status !== "done") throw new NotFoundError("El video todavía no está montado.");
+    if (req.query.download) res.set("Content-Disposition", contentDisposition(`${safeFileName(project.name)}.mp4`));
+    // sendFile admite peticiones por rangos: el reproductor puede saltar sin descargar todo el video.
+    res.sendFile(videoPath(project.id), { headers: { "Content-Type": "video/mp4", "Cache-Control": "no-store" } }, (err) => {
+      if (err && !res.headersSent) sendError(res, new NotFoundError("Video no encontrado."), "Error al leer el video.");
+    });
+  } catch (error) {
+    sendError(res, error, "Error al leer el video.");
   }
 });
 
