@@ -7,7 +7,7 @@ import { defaultModel, EngineRegistry, generateScriptAudio, MAX_SCRIPT_CHARS } f
 import { geminiEngine } from "./engines/gemini";
 import { openRouterEngine } from "./engines/openrouter";
 import { availableModels } from "./ttsCatalog";
-import { defaultTextModel, FALLBACK_TEXT_MODEL, listTextModels, streamScript } from "./scriptWriter";
+import { defaultTextModel, FALLBACK_TEXT_MODEL, listTextModels, streamScript, textModelKey } from "./scriptWriter";
 import { buildScriptPrompt } from "../src/lib/scriptTemplates";
 import { streamChat } from "./scriptWriter";
 import { channelDataToText, fetchChannelData, parseChannelRef } from "./youtube";
@@ -134,8 +134,10 @@ app.post("/api/scripts/generate", async (req, res) => {
   const { titulo, tema, duracion, segmentos, template, model } = req.body ?? {};
   if (typeof titulo !== "string" || !titulo.trim()) return res.status(400).json({ error: "Escribe el título del documental." });
   if (typeof template !== "string" || !template.trim()) return res.status(400).json({ error: "El prompt del guion está vacío." });
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) return res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
+  const scriptModel = cleanModel(model) || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+  const key = textModelKey(scriptModel);
+  if ("error" in key) return res.status(400).json({ error: key.error });
+  const { apiKey } = key;
 
   const prompt = buildScriptPrompt(template.slice(0, 20000), {
     titulo: titulo.slice(0, 300),
@@ -149,7 +151,7 @@ app.post("/api/scripts/generate", async (req, res) => {
   try {
     const chunks = await streamScript(
       { apiKey, baseUrl: process.env.OPENROUTER_BASE_URL || undefined, signal: abort.signal },
-      { model: cleanModel(model) || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL, prompt }
+      { model: scriptModel, prompt }
     );
     // "X-Accel-Buffering: no" evita que Nginx acumule la respuesta y el texto aparece en vivo.
     res.set({ "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
@@ -194,19 +196,22 @@ async function streamWithResult(
   }
 }
 
-function openRouterKey(res: express.Response): string | null {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) res.status(400).json({ error: "Falta la variable de entorno OPENROUTER_API_KEY." });
-  return apiKey || null;
+function textKey(res: express.Response, model: string): string | null {
+  const key = textModelKey(model);
+  if ("error" in key) {
+    res.status(400).json({ error: key.error });
+    return null;
+  }
+  return key.apiKey;
 }
 
 app.post("/api/research/analyze", async (req, res) => {
   const { input, template, model } = req.body ?? {};
   if (typeof input !== "string" || !input.trim()) return res.status(400).json({ error: "Escribe un canal de YouTube o una idea." });
   if (typeof template !== "string" || !template.trim()) return res.status(400).json({ error: "El prompt de análisis está vacío." });
-  const apiKey = openRouterKey(res);
-  if (!apiKey) return;
   const textModel = cleanModel(model) || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+  const apiKey = textKey(res, textModel);
+  if (!apiKey) return;
 
   // Con clave de YouTube y un canal reconocible se usan datos exactos; si no, el modelo busca en la web.
   let channelText: string | undefined;
@@ -293,9 +298,9 @@ app.post("/api/research/:id/process", async (req, res) => {
       ? { nombre: niche.nombre.trim().slice(0, 300), porQue: String(niche.porQue ?? "").slice(0, 1000) }
       : run.niches[Number(nicheIndex)];
   if (!chosen) return res.status(400).json({ error: "Elige un nicho." });
-  const apiKey = openRouterKey(res);
-  if (!apiKey) return;
   const textModel = cleanModel(model) || run.model || process.env.OPENROUTER_TEXT_MODEL || FALLBACK_TEXT_MODEL;
+  const apiKey = textKey(res, textModel);
+  if (!apiKey) return;
   const origin = run.channelName || run.input;
 
   await streamWithResult(

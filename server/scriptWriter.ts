@@ -1,4 +1,5 @@
-// Generación de guiones con modelos de texto de OpenRouter (API de chat compatible con OpenAI, en streaming).
+// Generación de guiones con modelos de texto de OpenRouter o de Groq (ambos con API de chat compatible con OpenAI,
+// en streaming). Los modelos de Groq llevan el prefijo "groq:" (p. ej. "groq:openai/gpt-oss-120b").
 import { OPENROUTER_BASE_URL } from "./engines/openrouter";
 import { TtsError } from "./engines/types";
 
@@ -18,13 +19,46 @@ const PROMPT_TOKENS = 2000;
 const OUTPUT_TOKENS = 8000;
 export const MAX_OUTPUT_TOKENS = 16000;
 
+export const GROQ_PREFIX = "groq:";
+export const GROQ_BASE_URL = "https://api.groq.com/openai/v1";
+export const isGroqModel = (model: string) => model.startsWith(GROQ_PREFIX);
+// Modelos de Groq que no escriben texto (voz, transcripción, moderación).
+const GROQ_NOT_TEXT = /whisper|orpheus|playai|tts|guard|distil/i;
+
+// Clave que necesita un modelo, o el mensaje de error si falta.
+export function textModelKey(model: string): { apiKey: string } | { error: string } {
+  const groq = isGroqModel(model);
+  const apiKey = groq ? process.env.GROQ_API_KEY : process.env.OPENROUTER_API_KEY;
+  return apiKey ? { apiKey } : { error: `Falta la variable de entorno ${groq ? "GROQ_API_KEY" : "OPENROUTER_API_KEY"}.` };
+}
+
+async function listGroqModels(doFetch: typeof fetch): Promise<TextModel[]> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return [];
+  try {
+    const res = await doFetch(`${process.env.GROQ_BASE_URL || GROQ_BASE_URL}/models`, { headers: { Authorization: `Bearer ${apiKey}` } });
+    if (!res.ok) return [];
+    const data: any = await res.json();
+    return (data?.data ?? [])
+      .filter((m: any) => typeof m?.id === "string" && m.active !== false && !GROQ_NOT_TEXT.test(m.id))
+      .map((m: any) => ({ id: `${GROQ_PREFIX}${m.id}`, name: `Groq · ${m.id}` }))
+      .sort((a: TextModel, b: TextModel) => a.name.localeCompare(b.name));
+  } catch {
+    return [];
+  }
+}
+
 const CACHE_MS = 60 * 60 * 1000;
 let cache: { at: number; models: TextModel[] } | null = null;
 
 export async function listTextModels(doFetch: typeof fetch = fetch, baseUrl = OPENROUTER_BASE_URL): Promise<TextModel[]> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.models;
   const res = await doFetch(`${baseUrl}/models`);
-  if (!res.ok) throw new TtsError(`OpenRouter (${res.status}) al listar modelos`, res.status);
+  if (!res.ok) {
+    const groq = await listGroqModels(doFetch);
+    if (groq.length) return groq;
+    throw new TtsError(`OpenRouter (${res.status}) al listar modelos`, res.status);
+  }
   const data: any = await res.json();
   const models: TextModel[] = (data?.data ?? [])
     .filter((m: any) => {
@@ -45,7 +79,7 @@ export async function listTextModels(doFetch: typeof fetch = fetch, baseUrl = OP
     if (match) recommended.push({ ...match, recommended: true });
   }
   const rest = models.filter((m) => !recommended.some((r) => r.id === m.id)).sort((a, b) => a.name.localeCompare(b.name));
-  cache = { at: Date.now(), models: [...recommended, ...rest] };
+  cache = { at: Date.now(), models: [...recommended, ...(await listGroqModels(doFetch)), ...rest] };
   return cache.models;
 }
 
@@ -53,8 +87,8 @@ export function defaultTextModel(models: TextModel[]): string {
   return process.env.OPENROUTER_TEXT_MODEL || models.find((m) => m.recommended)?.id || models[0]?.id || FALLBACK_TEXT_MODEL;
 }
 
-// Lee un flujo SSE de OpenRouter y entrega el texto a medida que llega.
-export async function* readChatStream(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+// Lee un flujo SSE de chat (OpenRouter o Groq) y entrega el texto a medida que llega.
+export async function* readChatStream(body: ReadableStream<Uint8Array>, provider = "OpenRouter"): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -76,7 +110,7 @@ export async function* readChatStream(body: ReadableStream<Uint8Array>): AsyncGe
       } catch {
         continue;
       }
-      if (event?.error) throw new TtsError(`OpenRouter: ${event.error.message || "error durante la generación"}`, 502);
+      if (event?.error) throw new TtsError(`${provider}: ${event.error.message || "error durante la generación"}`, 502);
       const text = event?.choices?.[0]?.delta?.content;
       if (typeof text === "string" && text) yield text;
     }
@@ -95,17 +129,22 @@ export async function streamChat(
   options: ChatOptions,
   request: { model: string; prompt: string; webSearch?: boolean; maxTokens?: number; temperature?: number }
 ): Promise<AsyncGenerator<string>> {
-  const { apiKey, baseUrl = OPENROUTER_BASE_URL, fetch: doFetch = fetch, signal } = options;
+  const { fetch: doFetch = fetch, signal } = options;
+  const groq = isGroqModel(request.model);
+  // Groq: su propia URL y clave; el tope de salida lo pone cada modelo y no tiene el plugin de búsqueda web.
+  const apiKey = groq ? process.env.GROQ_API_KEY || options.apiKey : options.apiKey;
+  const baseUrl = groq ? process.env.GROQ_BASE_URL || GROQ_BASE_URL : options.baseUrl || OPENROUTER_BASE_URL;
+  const provider = groq ? "Groq" : "OpenRouter";
   const res = await doFetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "X-Title": "Audios Profesionales" },
     body: JSON.stringify({
-      model: request.model,
+      model: groq ? request.model.slice(GROQ_PREFIX.length) : request.model,
       stream: true,
-      max_tokens: request.maxTokens ?? MAX_OUTPUT_TOKENS,
+      ...(groq ? {} : { max_tokens: request.maxTokens ?? MAX_OUTPUT_TOKENS }),
       temperature: request.temperature ?? 0.8,
       messages: [{ role: "user", content: request.prompt }],
-      ...(request.webSearch ? { plugins: [{ id: "web", max_results: 8 }] } : {}),
+      ...(request.webSearch && !groq ? { plugins: [{ id: "web", max_results: 8 }] } : {}),
     }),
     signal,
   });
@@ -117,9 +156,10 @@ export async function streamChat(
     } catch {
       // Respuesta no JSON.
     }
-    throw new TtsError(`OpenRouter (${res.status}): ${message || res.statusText}`, res.status);
+    if (res.status === 402) message = `sin saldo. ${message}`;
+    throw new TtsError(`${provider} (${res.status}): ${message || res.statusText}`, res.status);
   }
-  return readChatStream(res.body);
+  return readChatStream(res.body, provider);
 }
 
 export function streamScript(options: ChatOptions, request: { model: string; prompt: string }): Promise<AsyncGenerator<string>> {

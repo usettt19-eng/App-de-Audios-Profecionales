@@ -208,3 +208,25 @@ test("muestra de forma legible los errores de validación de OpenRouter", async 
     /OpenRouter \(400\): response_format: Invalid option: expected one of "mp3"\|"pcm"$/
   );
 });
+
+test("un 400 del proveedor de voz muestra su detalle, se reintenta y el último intento va sin instrucciones", async () => {
+  const calls: any[] = [];
+  const providerError = () =>
+    new Response(
+      JSON.stringify({ error: { message: "Provider returned 400", metadata: { provider_name: "Google", raw: JSON.stringify({ error: { message: "Model tried to generate text" } }) } } }),
+      { status: 400 }
+    );
+  await generateScriptAudio(
+    engines(calls, (_b, n) => (n < 3 ? providerError() : new Response(toneWav(1, 24000, 1)))),
+    { model: "google/gemini-3.8-flash-tts", script: "Hola.", voices: {} }
+  );
+  assert.equal(calls.length, 3);
+  assert.ok(calls[0].body.instructions && calls[1].body.instructions);
+  assert.equal(calls[2].body.instructions, undefined);
+
+  const failing: any[] = [];
+  await assert.rejects(
+    generateScriptAudio(engines(failing, providerError), { model: "google/gemini-3.8-flash-tts", script: "Adiós.", voices: {} }),
+    /Provider returned 400 \(Google\): Model tried to generate text/
+  );
+});

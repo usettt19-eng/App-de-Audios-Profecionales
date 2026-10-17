@@ -68,6 +68,7 @@ En **Nuevo proyecto → Generar guion con IA** escribes el título del documenta
 - El prompt es editable y admite las variables `{titulo}`, `{tema}`, `{duracion}`, `{palabras}` y `{segmentos}`.
 - Al final se añaden siempre unas reglas de formato fijas (`src/lib/scriptTemplates.ts`) para que el modelo marque cada bloque como `[BLOQUE N — NOMBRE]` con su música, tono y pausas, y la app pueda dividirlo en audios.
 - El modelo se elige de la lista de OpenRouter, con los recomendados primero y el costo aproximado por guion. Por defecto, el primero disponible entre Claude Sonnet/Opus, GPT-5 y Gemini 3 (o `OPENROUTER_TEXT_MODEL`).
+- **Groq (opcional):** con `GROQ_API_KEY`, los modelos de texto de Groq aparecen en la misma lista como "Groq · …" (sirven sin saldo en OpenRouter). Son modelos abiertos: rápidos y baratos, pero con más riesgo de datos inventados; no tienen búsqueda web, así que para analizar un canal sin `YOUTUBE_API_KEY` conviene un modelo de OpenRouter. Groq no tiene voz en español, imágenes ni música.
 - Al generar, el nombre del proyecto sale del título y la dirección de voz se completa con la del proceso documental (voz grave de documental, 90-95 % de velocidad, pausas tras cifras y el prompt de estilo).
 - Se añaden siempre reglas de **fidelidad al tema**: todo debe pertenecer a lo que dice el título (si nombra un país, todos los lugares deben estar allí), adaptando los ejemplos del formato en vez de cambiar de tema, y sin inventar datos.
 - El guion se puede corregir antes de crear el proyecto.
@@ -230,7 +231,7 @@ Configura estos *secrets* en GitHub (repo → Settings → Secrets and variables
 | `APP_PORT` | Puerto del servidor para la app (por defecto `3000`; usa uno libre si otro servicio lo ocupa) |
 | `APP_BIND` | `127.0.0.1` para que la app solo sea accesible a través de tu proxy inverso; por defecto `0.0.0.0` (abierta) |
 | `YOUTUBE_API_KEY` | Opcional: datos exactos de canales para el análisis de Ideas |
-| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `OPENROUTER_IMAGE_MODEL`, `OPENROUTER_MUSIC_MODEL`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
+| `OPENROUTER_TTS_MODEL`, `OPENROUTER_TEXT_MODEL`, `OPENROUTER_IMAGE_MODEL`, `OPENROUTER_MUSIC_MODEL`, `GROQ_API_KEY`, `GEMINI_API_KEY`, `SSH_PORT` | Opcionales |
 
 Sin `SSH_HOST` y `SSH_PRIVATE_KEY` el despliegue se omite. La app queda en `http://IP:APP_PORT`. Si ya usas un proxy inverso (Nginx, Traefik, Caddy...), apúntalo a ese puerto y define el secret `APP_BIND=127.0.0.1` para no exponerlo directamente.
 

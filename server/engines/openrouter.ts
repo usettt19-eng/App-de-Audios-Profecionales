@@ -46,6 +46,19 @@ async function errorFrom(res: Response): Promise<TtsError> {
   try {
     const data = JSON.parse(text);
     message = data?.error?.message || data?.message || message;
+    // "Provider returned 400": el detalle del proveedor (Google, etc.) viene en metadata.raw.
+    const raw = data?.error?.metadata?.raw;
+    if (raw) {
+      let detail = typeof raw === "string" ? raw : JSON.stringify(raw);
+      try {
+        const parsed = JSON.parse(detail);
+        detail = parsed?.error?.message || parsed?.message || detail;
+      } catch {
+        // Detalle en texto plano.
+      }
+      const provider = data?.error?.metadata?.provider_name;
+      message = `${message}${provider ? ` (${provider})` : ""}: ${String(detail).slice(0, 300)}`;
+    }
     // Los errores de validación llegan como una lista JSON de problemas: se muestran solo sus mensajes.
     const issues = JSON.parse(message);
     if (Array.isArray(issues)) message = issues.map((i: any) => [i?.path?.join?.("."), i?.message].filter(Boolean).join(": ")).join("; ");
@@ -69,11 +82,14 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
       const rejected = rejectedParams.get(model) ?? new Set<string>();
       rejectedParams.set(model, rejected);
 
+      let providerFailures = 0;
       return withRetries(async () => {
         const body: Record<string, unknown> = { model, input: buildInput(block), response_format: "pcm" };
         if (voice) body.voice = voice;
         if (speed && !rejected.has("speed")) body.speed = speed;
-        if (instructions && !rejected.has("instructions")) body.instructions = instructions;
+        // Tras dos fallos del proveedor, el último intento va sin instrucciones de estilo (a veces el modelo
+        // de voz se confunde con ellas y responde con texto en vez de audio).
+        if (instructions && !rejected.has("instructions") && providerFailures < 2) body.instructions = instructions;
 
         const res = await doFetch(`${baseUrl}/audio/speech`, {
           method: "POST",
@@ -90,6 +106,12 @@ export function openRouterEngine(options: () => OpenRouterOptions): TtsEngine {
           const param = OPTIONAL_PARAMS.find((p) => p in body && new RegExp(p, "i").test(error.message));
           if (res.status === 400 && param) {
             rejected.add(param);
+            throw new TtsError(error.message, 503);
+          }
+          // Errores 400 del proveedor de voz (no de la solicitud): suelen ser fallos puntuales del modelo,
+          // así que se reintentan.
+          if (res.status === 400 && /provider returned/i.test(error.message)) {
+            providerFailures++;
             throw new TtsError(error.message, 503);
           }
           throw error;
